@@ -1,5 +1,8 @@
 from types import SimpleNamespace
 
+import pytest
+
+from application import ibkr_portfolio
 from application.ibkr_portfolio import fetch_portfolio_snapshot
 
 
@@ -96,6 +99,36 @@ def test_fetch_portfolio_snapshot_prefers_market_currency_cash_balance():
     assert snapshot.metadata["available_funds"] == 885.99
 
 
+def test_fetch_portfolio_snapshot_supports_ibkr_ledger_cash_balance():
+    class LedgerCashIB(FakeIB):
+        def positions(self):
+            return []
+
+        def accountValues(self):
+            return [
+                SimpleNamespace(account="U16608560", currency="USD", tag="NetLiquidation", value="1130"),
+                SimpleNamespace(account="U16608560", currency="USD", tag="AvailableFunds", value="885.99"),
+                SimpleNamespace(
+                    account="U16608560",
+                    currency="USD",
+                    tag="$LEDGER-CashBalance",
+                    value="477.10",
+                ),
+                SimpleNamespace(account="U16608560", currency="USD", tag="TotalCashValue", value="500.00"),
+            ]
+
+    snapshot = fetch_portfolio_snapshot(
+        LedgerCashIB(),
+        account_ids=("U16608560",),
+        wait_seconds=0,
+        currency="USD",
+    )
+
+    assert snapshot.total_equity == 477.10
+    assert snapshot.buying_power == 477.10
+    assert snapshot.metadata["market_currency_cash"] == 477.10
+
+
 def test_fetch_portfolio_snapshot_allows_negative_cash_balance():
     class NegativeCashIB(FakeIB):
         def positions(self):
@@ -117,3 +150,56 @@ def test_fetch_portfolio_snapshot_allows_negative_cash_balance():
 
     assert snapshot.buying_power == -284.0
     assert snapshot.metadata["market_currency_cash"] == -284.0
+
+
+def test_fetch_portfolio_snapshot_rejects_incomplete_cash_only_account_data():
+    class MissingCashIB(FakeIB):
+        def positions(self):
+            return []
+
+        def accountValues(self):
+            return [
+                SimpleNamespace(
+                    account="U16608560",
+                    currency="USD",
+                    tag="NetLiquidation",
+                    value="1130",
+                )
+            ]
+
+    with pytest.raises(
+        ibkr_portfolio.IBKRPortfolioSnapshotUnavailableError,
+        match="cash balance",
+    ):
+        fetch_portfolio_snapshot(
+            MissingCashIB(),
+            account_ids=("U16608560",),
+            wait_seconds=0,
+            currency="USD",
+        )
+
+
+def test_fetch_portfolio_snapshot_allows_explicit_zero_cash_balance():
+    class ZeroCashIB(FakeIB):
+        def positions(self):
+            return []
+
+        def accountValues(self):
+            return [
+                SimpleNamespace(
+                    account="U16608560",
+                    currency="USD",
+                    tag="CashBalance",
+                    value="0",
+                )
+            ]
+
+    snapshot = fetch_portfolio_snapshot(
+        ZeroCashIB(),
+        account_ids=("U16608560",),
+        wait_seconds=0,
+        currency="USD",
+    )
+
+    assert snapshot.total_equity == 0.0
+    assert snapshot.metadata["market_currency_cash"] == 0.0

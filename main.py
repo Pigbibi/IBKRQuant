@@ -21,6 +21,7 @@ except ImportError:
 from application.cycle_result import coerce_strategy_cycle_result
 from application.runtime_broker_adapters import (
     IBKRGatewayUnavailableError,
+    IBKRTradingPermissionError,
     build_runtime_broker_adapters,
 )
 from application.runtime_composer import build_runtime_composer
@@ -74,7 +75,10 @@ from application.monitor_dispatcher import (
     max_workers_from_env,
     timeout_seconds_from_env,
 )
-from application.ibkr_portfolio import fetch_portfolio_snapshot
+from application.ibkr_portfolio import (
+    IBKRPortfolioSnapshotUnavailableError,
+    fetch_portfolio_snapshot,
+)
 from application.execution_service import (
     check_order_submitted as application_check_order_submitted,
     execute_rebalance as application_execute_rebalance,
@@ -1292,28 +1296,53 @@ def _handle_request(
         )
         if notification_delivery_log:
             report_summary["notification_delivery_log"] = notification_delivery_log
+        execution_status = str(report_summary.get("execution_status") or "").strip().lower()
+        execution_blocked = execution_status in {"blocked", "error", "failed", "failure"}
+        if execution_blocked:
+            append_runtime_report_error(
+                report,
+                stage="strategy_execution",
+                message=(
+                    f"Strategy execution status is {execution_status}; "
+                    f"reason={report_summary.get('no_op_reason') or 'unspecified'}"
+                ),
+                error_type="StrategyExecutionBlocked",
+                failure_category="strategy_execution_blocked",
+            )
+        report_diagnostics = {
+            "result": cycle_result.result,
+            "price_source_mode": execution_summary.get("price_source_mode") or reconciliation_record.get("price_source_mode"),
+            "snapshot_price_fallback_symbols": execution_summary.get("snapshot_price_fallback_symbols")
+            or reconciliation_record.get("snapshot_price_fallback_symbols")
+            or [],
+            **({"signal_snapshot": signal_snapshot} if has_signal_snapshot else {}),
+        }
+        if execution_blocked:
+            report_diagnostics["failure_category"] = "strategy_execution_blocked"
         finalize_runtime_report(
             report,
-            status="ok",
+            status="error" if execution_blocked else "ok",
             summary=report_summary,
-            diagnostics={
-                "result": cycle_result.result,
-                "price_source_mode": execution_summary.get("price_source_mode") or reconciliation_record.get("price_source_mode"),
-                "snapshot_price_fallback_symbols": execution_summary.get("snapshot_price_fallback_symbols")
-                or reconciliation_record.get("snapshot_price_fallback_symbols")
-                or [],
-                **({"signal_snapshot": signal_snapshot} if has_signal_snapshot else {}),
-            },
+            diagnostics=report_diagnostics,
             artifacts={
                 "reconciliation_record_path": cycle_result.reconciliation_record_path,
             },
         )
         log_runtime_event(
             log_context,
-            "strategy_cycle_completed",
-            message="Strategy dry-run completed" if dry_run_only_override else "Strategy execution completed",
+            "strategy_cycle_blocked" if execution_blocked else "strategy_cycle_completed",
+            message=(
+                "Strategy execution blocked"
+                if execution_blocked
+                else "Strategy dry-run completed"
+                if dry_run_only_override
+                else "Strategy execution completed"
+            ),
+            severity="ERROR" if execution_blocked else "INFO",
             execution_window=execution_window,
             result=cycle_result.result,
+            execution_status=report_summary.get("execution_status"),
+            no_op_reason=report_summary.get("no_op_reason"),
         )
         return (response_body if dry_run_only_override else cycle_result.result), 200
     except RuntimeDeadlineExceeded as exc:
@@ -1356,6 +1385,40 @@ def _handle_request(
             failure_category="ibkr_gateway_unavailable",
         )
         error_msg = f"🚨 【IBKR 连接异常】\n{str(exc)}"
+        _publish_runtime_failure_notification(
+            detailed_text=error_msg,
+            compact_text=error_msg,
+            exc=exc,
+        )
+        return "Error", 503
+    except (IBKRTradingPermissionError, IBKRPortfolioSnapshotUnavailableError) as exc:
+        failure_category = (
+            "ibkr_trading_permission"
+            if isinstance(exc, IBKRTradingPermissionError)
+            else "ibkr_portfolio_snapshot"
+        )
+        append_runtime_report_error(
+            report,
+            stage=failure_category,
+            message=str(exc),
+            error_type=type(exc).__name__,
+            failure_category=failure_category,
+        )
+        finalize_runtime_report(
+            report,
+            status="error",
+            diagnostics={"failure_category": failure_category},
+        )
+        log_runtime_event(
+            log_context,
+            f"{failure_category}_failed",
+            message="IBKR execution readiness validation failed",
+            severity="ERROR",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            failure_category=failure_category,
+        )
+        error_msg = f"🚨 【IBKR 执行条件异常】\n{str(exc)}"
         _publish_runtime_failure_notification(
             detailed_text=error_msg,
             compact_text=error_msg,

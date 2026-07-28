@@ -492,6 +492,21 @@ def test_runtime_target_scheduler_does_not_skip_when_lookback_includes_scheduler
     assert reason is None
 
 
+def test_report_with_blocked_execution_status_is_rejected_even_when_top_level_is_ok():
+    accepted, reason = heartbeat._is_accepted_report(
+        {
+            "status": "ok",
+            "summary": {
+                "execution_status": "blocked",
+                "no_op_reason": "no_equity",
+            },
+        }
+    )
+
+    assert accepted is False
+    assert reason == "rejected execution_status=blocked"
+
+
 def test_telegram_token_falls_back_to_secret_manager(monkeypatch):
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
     monkeypatch.delenv("TG_TOKEN", raising=False)

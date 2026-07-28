@@ -387,6 +387,56 @@ def test_run_strategy_core_writes_reconciliation_record(tmp_path):
     assert "目标差异" not in observed["messages"][0]
 
 
+def test_run_strategy_core_propagates_blocked_execution_status(tmp_path):
+    class FakeIB:
+        def isConnected(self):
+            return True
+
+        def disconnect(self):
+            return None
+
+    reason = "submit_failed:AAA:Rejected"
+    result = run_strategy_core(
+        connect_ib=lambda: FakeIB(),
+        get_current_portfolio=lambda _ib: ({}, {"equity": 1000.0, "buying_power": 1000.0}),
+        compute_signals=lambda _ib, _holdings: (
+            {"AAA": 1.0},
+            "signal",
+            False,
+            "breadth=60.0%",
+            {
+                "strategy_profile": "tech_communication_pullback_enhancement",
+                "managed_symbols": ("AAA",),
+                "trade_date": "2026-04-01",
+                "snapshot_as_of": "2026-03-31",
+                "allocation": _weight_allocation({"AAA": 1.0}, risk_symbols=("AAA",)),
+            },
+        ),
+        execute_rebalance=lambda *_args, **_kwargs: (
+            [f"failed {reason}"],
+            {
+                "execution_status": "blocked",
+                "no_op_reason": reason,
+                "orders_submitted": [],
+                "orders_filled": [],
+                "orders_partially_filled": [],
+                "orders_skipped": [{"symbol": "AAA", "reason": "Rejected"}],
+                "skipped_reasons": [reason],
+            },
+        ),
+        send_tg_message=lambda _message: None,
+        config=IBKRRebalanceConfig(
+            translator=_build_test_translator(),
+            separator="---",
+            notify_no_trade_cycles=False,
+            reconciliation_output_path=tmp_path / "reconciliation.json",
+        ),
+    )
+
+    assert result.result == f"Blocked - {reason}"
+    assert result.execution_summary["execution_status"] == "blocked"
+
+
 def test_trade_notification_keeps_detailed_logs_out_of_compact_message():
     notification = render_trade_notification(
         dashboard="📌 Strategy portfolio\n  - Total assets: $1,000.00",

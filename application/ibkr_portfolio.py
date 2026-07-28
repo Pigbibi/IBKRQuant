@@ -8,7 +8,18 @@ from typing import Any
 
 from quant_platform_kit.common.models import PortfolioSnapshot, Position
 
-MARKET_CURRENCY_CASH_TAG_PRIORITY = ("CashBalance", "TotalCashBalance", "SettledCash")
+MARKET_CURRENCY_CASH_TAG_PRIORITY = (
+    "$LEDGER-CashBalance",
+    "$LEDGER-TotalCashBalance",
+    "CashBalance",
+    "TotalCashBalance",
+    "SettledCash",
+    "TotalCashValue",
+)
+
+
+class IBKRPortfolioSnapshotUnavailableError(RuntimeError):
+    """Raised when IBKR did not return enough account data for safe execution."""
 
 
 def _normalize_account_ids(account_ids: Iterable[str] | str | None) -> tuple[str, ...]:
@@ -126,11 +137,14 @@ def fetch_portfolio_snapshot(
 
     total_equity = 0.0
     available_funds = None
+    matched_account_value_count = 0
+    matched_market_currency_value_count = 0
     values_by_account_currency: dict[tuple[str | None, str], dict[str, float]] = {}
     for account_value in ib.accountValues():
         account_id = str(getattr(account_value, "account", "") or "").strip() or None
         if not _matches_account(account_id, selected_account_ids):
             continue
+        matched_account_value_count += 1
         value_currency = str(getattr(account_value, "currency", "") or "").strip().upper()
         if value_currency:
             tag_values = values_by_account_currency.setdefault((account_id, value_currency), {})
@@ -139,6 +153,7 @@ def fetch_portfolio_snapshot(
                 tag_values[str(getattr(account_value, "tag", "") or "").strip()] = numeric_value
         if value_currency != market_currency:
             continue
+        matched_market_currency_value_count += 1
         if account_value.tag == "NetLiquidation":
             total_equity += float(account_value.value)
         elif account_value.tag == "AvailableFunds":
@@ -149,6 +164,18 @@ def fetch_portfolio_snapshot(
         values_by_account_currency,
         currency=market_currency,
     )
+    if selected_account_ids and matched_account_value_count == 0:
+        raise IBKRPortfolioSnapshotUnavailableError(
+            "IBKR returned no account values for the configured account selection."
+        )
+    if selected_account_ids and matched_market_currency_value_count == 0:
+        raise IBKRPortfolioSnapshotUnavailableError(
+            f"IBKR returned no {market_currency} account values for the configured account selection."
+        )
+    if cash_only_execution and not positions and market_currency_cash is None:
+        raise IBKRPortfolioSnapshotUnavailableError(
+            f"IBKR cash-only snapshot is missing the {market_currency} cash balance and positions."
+        )
     if cash_only_execution:
         buying_power = float(market_currency_cash or 0.0) if market_currency_cash is not None else 0.0
         position_market_values = {

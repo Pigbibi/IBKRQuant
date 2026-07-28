@@ -107,6 +107,17 @@ def test_get_available_buying_power_prefers_usd_cash_balance_over_aggregate_avai
     assert get_available_buying_power(FakeIB(), 885.99, currency="USD") == 477.10
 
 
+def test_get_available_buying_power_supports_ibkr_ledger_cash_balance():
+    class FakeIB:
+        def accountValues(self):
+            return [
+                SimpleNamespace(tag="AvailableFunds", currency="USD", value="885.99"),
+                SimpleNamespace(tag="$LEDGER-CashBalance", currency="USD", value="477.10"),
+            ]
+
+    assert get_available_buying_power(FakeIB(), 885.99, currency="USD") == 477.10
+
+
 def test_execute_rebalance_submits_limit_buy_for_underweight_position(monkeypatch, tmp_path):
     class FakeIB:
         def openTrades(self):
@@ -161,6 +172,55 @@ def test_execute_rebalance_submits_limit_buy_for_underweight_position(monkeypatc
     assert submitted[0].symbol == "VOO"
     assert submitted[0].order_type == "limit"
     assert any(log.startswith("buy VOO") for log in trade_logs)
+
+
+def test_execute_rebalance_blocks_when_all_order_submissions_are_rejected(tmp_path):
+    class FakeIB:
+        def openTrades(self):
+            return []
+
+        def fills(self):
+            return []
+
+        def accountValues(self):
+            return [SimpleNamespace(tag="CashBalance", currency="USD", value="1000")]
+
+    trade_logs, summary = execute_rebalance(
+        FakeIB(),
+        {"VOO": 1.0},
+        {},
+        {"equity": 1000.0, "buying_power": 1000.0},
+        fetch_quote_snapshots=lambda _ib, symbols: {
+            symbol: SimpleNamespace(last_price=100.0) for symbol in symbols
+        },
+        submit_order_intent=lambda *_args, **_kwargs: SimpleNamespace(
+            broker_order_id=None,
+            status="Rejected",
+        ),
+        order_intent_cls=OrderIntent,
+        translator=translate,
+        strategy_symbols=["VOO"],
+        strategy_profile="tech_communication_pullback_enhancement",
+        signal_metadata=_signal_metadata(
+            {"VOO": 1.0},
+            risk_symbols=("VOO",),
+            trade_date="2026-04-01",
+            snapshot_as_of="2026-03-31",
+        ),
+        dry_run_only=False,
+        cash_reserve_ratio=0.0,
+        rebalance_threshold_ratio=0.02,
+        limit_buy_premium=1.005,
+        sell_settle_delay_sec=0,
+        execution_lock_dir=tmp_path,
+        return_summary=True,
+    )
+
+    assert summary["execution_status"] == "blocked"
+    assert summary["no_op_reason"] == "submit_failed:VOO:Rejected"
+    assert summary["skipped_reasons"] == ["submit_failed:VOO:Rejected"]
+    assert summary["orders_submitted"] == []
+    assert "failed submit_failed:VOO:Rejected" in trade_logs
 
 
 def test_execute_rebalance_uses_symbol_specific_limit_buy_premium(monkeypatch, tmp_path):

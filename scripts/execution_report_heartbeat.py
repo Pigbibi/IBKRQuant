@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_ACCEPT_STATUSES = {"ok", "skipped", "success", "completed", "no_action"}
 DEFAULT_REJECT_STATUSES = {"error", "failed", "failure", "cancelled", "canceled", "timed_out"}
+DEFAULT_REJECT_EXECUTION_STATUSES = {"blocked", "error", "failed", "failure"}
 DEFAULT_ACCEPT_STAGES = {
     "DRY_RUN_COMPLETED",
     "FUNDING_BLOCKED",
@@ -749,6 +750,12 @@ def _report_status(payload: dict[str, Any]) -> tuple[str, str]:
     return status, stage
 
 
+def _report_execution_status(payload: dict[str, Any]) -> str:
+    summary = payload.get("summary")
+    nested_status = summary.get("execution_status") if isinstance(summary, dict) else None
+    return str(payload.get("execution_status") or nested_status or "").strip()
+
+
 def _payload_service_name(payload: dict[str, Any]) -> str:
     runtime_target = payload.get("runtime_target")
     service = payload.get("service_name")
@@ -806,11 +813,15 @@ def _is_accepted_report(payload: dict[str, Any]) -> tuple[bool, str]:
     status, stage = _report_status(payload)
     status_key = status.lower()
     stage_key = stage.upper()
+    execution_status = _report_execution_status(payload)
+    execution_status_key = execution_status.lower()
     errors = _report_errors(payload)
     if errors and not allow_errors:
         return False, f"errors={len(errors)} status={status or '-'} stage={stage or '-'}"
     if status_key in reject_statuses or stage_key in reject_stages:
         return False, f"rejected status={status or '-'} stage={stage or '-'}"
+    if execution_status_key in DEFAULT_REJECT_EXECUTION_STATUSES:
+        return False, f"rejected execution_status={execution_status}"
     if status_key and status_key in accepted_statuses:
         return True, f"status={status}"
     if stage_key and stage_key in accepted_stages:
