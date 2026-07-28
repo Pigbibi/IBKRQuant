@@ -130,6 +130,12 @@ class IBKRRuntimeBrokerAdapters:
                     "IB Gateway API is in Read-Only mode; live execution is disabled."
                 ) from exc
             raise
+        except (ConnectionError, OSError) as exc:
+            if read_only_errors or is_read_only_error(exc):
+                raise IBKRTradingPermissionError(
+                    "IB Gateway API is in Read-Only mode; live execution is disabled."
+                ) from exc
+            raise
         except Exception as exc:
             if is_read_only_error(exc):
                 raise IBKRTradingPermissionError(

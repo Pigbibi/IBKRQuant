@@ -215,6 +215,73 @@ def test_connect_ib_rejects_live_gateway_read_only_mode_without_retry():
     }
 
 
+def test_connect_ib_retries_when_trading_permission_probe_loses_connection():
+    observed = {
+        "connects": 0,
+        "disconnects": 0,
+        "open_order_requests": 0,
+        "refreshes": 0,
+    }
+
+    class FakeEvent:
+        def __init__(self):
+            self.handlers = []
+
+        def __iadd__(self, handler):
+            self.handlers.append(handler)
+            return self
+
+        def __isub__(self, handler):
+            self.handlers.remove(handler)
+            return self
+
+    class FakeIB:
+        RaiseRequestErrors = False
+        RequestTimeout = 0
+
+        def __init__(self, attempt):
+            self.attempt = attempt
+            self.errorEvent = FakeEvent()
+
+        def managedAccounts(self):
+            return ["U1234567"]
+
+        def reqOpenOrders(self):
+            observed["open_order_requests"] += 1
+            if self.attempt == 1:
+                raise ConnectionError("gateway connection dropped")
+            return []
+
+        def disconnect(self):
+            observed["disconnects"] += 1
+
+    def connect(*_args, **_kwargs):
+        observed["connects"] += 1
+        return FakeIB(observed["connects"])
+
+    def refresh_host():
+        observed["refreshes"] += 1
+        return "127.0.0.1"
+
+    adapters = _build_adapters(account_ids=("U1234567",), execution_mode="live")
+    adapters = adapters.__class__(
+        **{
+            **adapters.__dict__,
+            "connect_ib_fn": connect,
+            "connect_attempts": 2,
+            "refresh_host_fn": refresh_host,
+        }
+    )
+
+    assert adapters.connect_ib().managedAccounts() == ["U1234567"]
+    assert observed == {
+        "connects": 2,
+        "disconnects": 1,
+        "open_order_requests": 2,
+        "refreshes": 1,
+    }
+
+
 def test_connect_ib_does_not_misclassify_unrelated_321_as_read_only():
     class FakeEvent:
         def __init__(self):
