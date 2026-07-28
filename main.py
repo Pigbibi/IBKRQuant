@@ -67,7 +67,7 @@ from quant_platform_kit.ibkr import (
     fetch_historical_price_series,
     fetch_quote_snapshots,
 )
-from application.ibkr_order_execution import submit_order_intent
+from application.ibkr_order_execution import probe_order_write_access, submit_order_intent
 from application.monitor_dispatcher import (
     dispatch_due_monitor_targets,
     load_monitor_targets,
@@ -543,6 +543,21 @@ def submit_market_order_intent(ib, order_intent, **kwargs):
     )
 
 
+def probe_market_order_write_access(ib):
+    managed_symbols = resolve_reporting_managed_symbols()
+    if len(ACCOUNT_IDS) != 1 or not managed_symbols:
+        raise RuntimeError(
+            "IBKR what-if permission probe requires one account_id and one managed symbol"
+        )
+    return probe_order_write_access(
+        ib,
+        symbol=managed_symbols[0],
+        account_id=ACCOUNT_IDS[0],
+        stock_exchange=MARKET_EXCHANGE,
+        stock_currency=MARKET_CURRENCY,
+    )
+
+
 def fetch_market_portfolio_snapshot(ib, **kwargs):
     return fetch_portfolio_snapshot(
         ib,
@@ -557,6 +572,7 @@ def build_broker_adapters(*, dry_run_only_override: bool | None = None):
     return build_runtime_broker_adapters(
         host_resolver=get_ib_host,
         refresh_host_fn=refresh_ib_host,
+        trading_permission_probe_fn=probe_market_order_write_access,
         ib_port=IB_PORT,
         ib_client_id=IB_CLIENT_ID,
         connect_timeout_seconds=IB_CONNECT_TIMEOUT_SECONDS,

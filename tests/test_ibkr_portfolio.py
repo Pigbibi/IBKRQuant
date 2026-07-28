@@ -47,6 +47,7 @@ class FakeIB:
         return [
             SimpleNamespace(account="UHK123", currency="HKD", tag="NetLiquidation", value="100000"),
             SimpleNamespace(account="UHK123", currency="HKD", tag="AvailableFunds", value="80000"),
+            SimpleNamespace(account="UHK123", currency="HKD", tag="CashBalance", value="0"),
             SimpleNamespace(account="UHK123", currency="USD", tag="NetLiquidation", value="999"),
             SimpleNamespace(account="UUS999", currency="HKD", tag="NetLiquidation", value="123"),
         ]
@@ -197,6 +198,40 @@ def test_fetch_portfolio_snapshot_rejects_incomplete_cash_only_account_data():
         fetch_portfolio_snapshot(
             MissingCashIB(),
             account_ids=("U16608560",),
+            wait_seconds=0,
+            currency="USD",
+        )
+
+
+def test_fetch_portfolio_snapshot_rejects_missing_cash_when_positions_exist():
+    class MissingCashWithPositionIB(FakeIB):
+        def positions(self):
+            return [
+                SimpleNamespace(
+                    account="UUS999",
+                    contract=SimpleNamespace(secType="STK", symbol="AAPL", currency="USD"),
+                    position=5,
+                    avgCost=190.0,
+                )
+            ]
+
+        def accountValues(self):
+            return [
+                SimpleNamespace(
+                    account="UUS999",
+                    currency="USD",
+                    tag="NetLiquidation",
+                    value="1130",
+                )
+            ]
+
+    with pytest.raises(
+        ibkr_portfolio.IBKRPortfolioSnapshotUnavailableError,
+        match="cash balance",
+    ):
+        fetch_portfolio_snapshot(
+            MissingCashWithPositionIB(),
+            account_ids=("UUS999",),
             wait_seconds=0,
             currency="USD",
         )

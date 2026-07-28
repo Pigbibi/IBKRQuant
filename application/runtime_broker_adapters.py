@@ -15,7 +15,7 @@ class IBKRGatewayUnavailableError(ConnectionError):
 
 
 class IBKRTradingPermissionError(RuntimeError):
-    """Raised when a live Gateway connection cannot verify order-read access."""
+    """Raised when a live Gateway connection cannot verify order-write access."""
 
 
 @dataclass(frozen=True)
@@ -60,6 +60,7 @@ class IBKRRuntimeBrokerAdapters:
     limit_buy_premium_by_symbol: dict[str, float] | None = None
     printer: Any = print
     refresh_host_fn: Any = None
+    trading_permission_probe_fn: Any = None
 
     def validate_configured_accounts(self, ib):
         if not self.account_ids:
@@ -92,10 +93,10 @@ class IBKRRuntimeBrokerAdapters:
     def validate_trading_permissions(self, ib):
         if self.dry_run_only or str(self.execution_mode or "").strip().lower() != "live":
             return
-        request_open_orders = getattr(ib, "reqOpenOrders", None)
-        if not callable(request_open_orders):
+        permission_probe = self.trading_permission_probe_fn
+        if not callable(permission_probe):
             raise IBKRTradingPermissionError(
-                "IB Gateway live execution cannot verify order-read access."
+                "IB Gateway live execution cannot verify non-transmitting order-write access."
             )
 
         original_raise_request_errors = getattr(ib, "RaiseRequestErrors", False)
@@ -116,11 +117,12 @@ class IBKRRuntimeBrokerAdapters:
             if error_event is not None:
                 error_event += capture_api_error
                 error_handler_registered = True
-            # Read order state only; this never calls placeOrder or cancelOrder.
+            # IBKR what-if validation exercises order-write access without creating a live order.
             ib.RaiseRequestErrors = True
             ib.RequestTimeout = self.connect_timeout_seconds
-            request_open_orders()
-            if read_only_errors:
+            probe_result = permission_probe(ib)
+            probe_warning = getattr(probe_result, "warningText", "")
+            if read_only_errors or is_read_only_error(probe_warning):
                 raise IBKRTradingPermissionError(
                     "IB Gateway API is in Read-Only mode; live execution is disabled."
                 )
@@ -142,7 +144,7 @@ class IBKRRuntimeBrokerAdapters:
                     "IB Gateway API is in Read-Only mode; live execution is disabled."
                 ) from exc
             raise IBKRTradingPermissionError(
-                "IB Gateway live execution could not verify order-read access "
+                "IB Gateway live execution could not verify non-transmitting order-write access "
                 f"(error_type={type(exc).__name__})."
             ) from exc
         finally:
@@ -387,6 +389,7 @@ def build_runtime_broker_adapters(
     limit_buy_premium_by_symbol: dict[str, float] | None = None,
     printer=print,
     refresh_host_fn=None,
+    trading_permission_probe_fn=None,
 ) -> IBKRRuntimeBrokerAdapters:
     return IBKRRuntimeBrokerAdapters(
         host_resolver=host_resolver,
@@ -429,4 +432,5 @@ def build_runtime_broker_adapters(
         execution_mode=str(execution_mode or "paper").strip().lower().replace("-", "_"),
         printer=printer,
         refresh_host_fn=refresh_host_fn,
+        trading_permission_probe_fn=trading_permission_probe_fn,
     )

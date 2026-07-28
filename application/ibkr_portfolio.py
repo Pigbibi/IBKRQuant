@@ -171,9 +171,9 @@ def fetch_portfolio_snapshot(
         raise IBKRPortfolioSnapshotUnavailableError(
             f"IBKR returned no {market_currency} account values for the configured account selection."
         )
-    if cash_only_execution and not positions and market_currency_cash is None:
+    if cash_only_execution and market_currency_cash is None:
         raise IBKRPortfolioSnapshotUnavailableError(
-            f"IBKR cash-only snapshot is missing the {market_currency} cash balance and positions."
+            f"IBKR cash-only snapshot is missing the {market_currency} cash balance."
         )
     if cash_only_execution:
         buying_power = float(market_currency_cash or 0.0) if market_currency_cash is not None else 0.0

@@ -9,7 +9,12 @@ from application.runtime_broker_adapters import (
 )
 
 
-def _build_adapters(*, account_ids=("U1234567",), execution_mode="paper"):
+def _build_adapters(
+    *,
+    account_ids=("U1234567",),
+    execution_mode="paper",
+    trading_permission_probe_fn=None,
+):
     return build_runtime_broker_adapters(
         host_resolver=lambda: "127.0.0.1",
         ib_port=4001,
@@ -46,6 +51,11 @@ def _build_adapters(*, account_ids=("U1234567",), execution_mode="paper"):
         strategy_display_name="Test Strategy",
         sleep_fn=lambda _seconds: None,
         printer=lambda *_args, **_kwargs: None,
+        trading_permission_probe_fn=(
+            trading_permission_probe_fn
+            if trading_permission_probe_fn is not None
+            else lambda ib: ib.whatIfOrder(None, None)
+        ),
     )
 
 
@@ -161,7 +171,7 @@ def test_connect_ib_rejects_live_mode_without_configured_account_ids():
 
 
 def test_connect_ib_rejects_live_gateway_read_only_mode_without_retry():
-    observed = {"disconnects": 0, "open_order_requests": 0}
+    observed = {"disconnects": 0, "permission_probe_requests": 0}
 
     class FakeEvent:
         def __init__(self):
@@ -189,8 +199,8 @@ def test_connect_ib_rejects_live_gateway_read_only_mode_without_retry():
         def managedAccounts(self):
             return ["U1234567"]
 
-        def reqOpenOrders(self):
-            observed["open_order_requests"] += 1
+        def whatIfOrder(self, _contract, _order):
+            observed["permission_probe_requests"] += 1
             self.errorEvent.emit(-1, 321, "API is in Read-Only mode", None)
             raise TimeoutError("open orders timed out")
 
@@ -211,7 +221,7 @@ def test_connect_ib_rejects_live_gateway_read_only_mode_without_retry():
 
     assert observed == {
         "disconnects": 1,
-        "open_order_requests": 1,
+        "permission_probe_requests": 1,
     }
 
 
@@ -219,7 +229,7 @@ def test_connect_ib_retries_when_trading_permission_probe_loses_connection():
     observed = {
         "connects": 0,
         "disconnects": 0,
-        "open_order_requests": 0,
+        "permission_probe_requests": 0,
         "refreshes": 0,
     }
 
@@ -246,8 +256,8 @@ def test_connect_ib_retries_when_trading_permission_probe_loses_connection():
         def managedAccounts(self):
             return ["U1234567"]
 
-        def reqOpenOrders(self):
-            observed["open_order_requests"] += 1
+        def whatIfOrder(self, _contract, _order):
+            observed["permission_probe_requests"] += 1
             if self.attempt == 1:
                 raise ConnectionError("gateway connection dropped")
             return []
@@ -277,7 +287,7 @@ def test_connect_ib_retries_when_trading_permission_probe_loses_connection():
     assert observed == {
         "connects": 2,
         "disconnects": 1,
-        "open_order_requests": 2,
+        "permission_probe_requests": 2,
         "refreshes": 1,
     }
 
@@ -309,9 +319,9 @@ def test_connect_ib_does_not_misclassify_unrelated_321_as_read_only():
         def managedAccounts(self):
             return ["U1234567"]
 
-        def reqOpenOrders(self):
+        def whatIfOrder(self, _contract, _order):
             self.errorEvent.emit(-1, 321, "Generic validation error", None)
-            return []
+            return SimpleNamespace(warningText="")
 
     adapters = _build_adapters(account_ids=("U1234567",), execution_mode="live")
     adapters = adapters.__class__(
@@ -329,7 +339,7 @@ def test_connect_ib_skips_trading_permission_probe_for_dry_run():
         def managedAccounts(self):
             return ["U1234567"]
 
-        def reqOpenOrders(self):
+        def whatIfOrder(self, _contract, _order):
             pytest.fail("dry-run connection must not probe trading permissions")
 
     adapters = _build_adapters(account_ids=("U1234567",), execution_mode="live")

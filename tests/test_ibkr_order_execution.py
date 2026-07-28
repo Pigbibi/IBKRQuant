@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from quant_platform_kit.common.models import OrderIntent
 
-from application.ibkr_order_execution import submit_order_intent
+from application.ibkr_order_execution import probe_order_write_access, submit_order_intent
 
 
 class FakeMarketOrder:
@@ -37,6 +37,17 @@ class FakeIB:
         )
 
 
+class FakeWhatIfIB:
+    def __init__(self):
+        self.probed_contract = None
+        self.probed_order = None
+
+    def whatIfOrder(self, contract, order):
+        self.probed_contract = contract
+        self.probed_order = order
+        return SimpleNamespace(warningText="")
+
+
 def fake_stock(symbol, exchange, currency):
     return SimpleNamespace(symbol=symbol, exchange=exchange, currency=currency)
 
@@ -50,6 +61,23 @@ def fake_option(symbol, expiration, strike, right, exchange, currency):
         exchange=exchange,
         currency=currency,
     )
+
+
+def test_probe_order_write_access_uses_explicit_what_if_order():
+    ib = FakeWhatIfIB()
+
+    probe_order_write_access(
+        ib,
+        symbol="AAPL",
+        account_id="U1234567",
+        stock_factory=fake_stock,
+        market_order_factory=FakeMarketOrder,
+    )
+
+    assert ib.probed_contract.symbol == "AAPL"
+    assert ib.probed_order.account == "U1234567"
+    assert ib.probed_order.whatIf is True
+    assert ib.probed_order.transmit is True
 
 
 def test_submit_order_intent_sets_default_day_tif_on_market_orders():
