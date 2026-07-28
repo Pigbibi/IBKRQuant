@@ -14,7 +14,6 @@ MARKET_CURRENCY_CASH_TAG_PRIORITY = (
     "CashBalance",
     "TotalCashBalance",
     "SettledCash",
-    "TotalCashValue",
 )
 
 

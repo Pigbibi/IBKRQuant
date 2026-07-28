@@ -831,6 +831,48 @@ def test_handle_request_marks_blocked_cycle_as_report_error_without_http_retry(
     assert observed["events"][-1][1]["severity"] == "ERROR"
 
 
+def test_handle_request_keeps_expected_execution_guard_as_success(
+    strategy_module_factory,
+    monkeypatch,
+):
+    strategy_module = strategy_module_factory(IBKR_DRY_RUN_ONLY="false")
+    observed = {"events": []}
+
+    monkeypatch.setattr(strategy_module, "build_run_id", lambda: "run-pending-order")
+    monkeypatch.setattr(strategy_module, "is_market_open_now", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        strategy_module,
+        "run_strategy_core",
+        lambda **_kwargs: StrategyCycleResult(
+            result="Blocked - pending order",
+            execution_summary={
+                "execution_status": "blocked",
+                "no_op_reason": "pending_orders_detected:AAA",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        strategy_module,
+        "persist_execution_report",
+        lambda report: observed.setdefault("report", dict(report)) or "/tmp/runtime-report.json",
+    )
+    monkeypatch.setattr(
+        strategy_module,
+        "log_runtime_event",
+        lambda _context, event, **fields: observed["events"].append((event, fields)),
+    )
+
+    with strategy_module.app.test_request_context("/run", method="POST"):
+        body, status = strategy_module.handle_request()
+
+    assert status == 200
+    assert body == "Blocked - pending order"
+    assert observed["report"]["status"] == "ok"
+    assert "failure_category" not in observed["report"]["diagnostics"]
+    assert observed["events"][-1][0] == "strategy_cycle_completed"
+    assert observed["events"][-1][1]["severity"] == "INFO"
+
+
 def test_cycle_report_summary_counts_dry_run_order_previews(strategy_module):
     cycle_result = StrategyCycleResult(result="Precheck OK")
     execution_summary = {

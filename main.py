@@ -97,6 +97,21 @@ app = Flask(__name__)
 ensure_event_loop = ibkr_ensure_event_loop
 NEW_YORK_TZ = ZoneInfo("America/New_York")
 STRATEGY_RUN_LOCK = threading.Lock()
+EXPECTED_EXECUTION_GUARD_REASON_PREFIXES = (
+    "pending_orders_detected:",
+    "same_day_fills_detected:",
+    "same_day_execution_locked:",
+)
+
+
+def _is_execution_failure(execution_status, no_op_reason) -> bool:
+    status = str(execution_status or "").strip().lower()
+    if status in {"error", "failed", "failure"}:
+        return True
+    if status != "blocked":
+        return False
+    reason = str(no_op_reason or "").strip().lower()
+    return not reason.startswith(EXPECTED_EXECUTION_GUARD_REASON_PREFIXES)
 
 
 def get_project_id():
@@ -1297,8 +1312,11 @@ def _handle_request(
         if notification_delivery_log:
             report_summary["notification_delivery_log"] = notification_delivery_log
         execution_status = str(report_summary.get("execution_status") or "").strip().lower()
-        execution_blocked = execution_status in {"blocked", "error", "failed", "failure"}
-        if execution_blocked:
+        execution_failed = _is_execution_failure(
+            execution_status,
+            report_summary.get("no_op_reason"),
+        )
+        if execution_failed:
             append_runtime_report_error(
                 report,
                 stage="strategy_execution",
@@ -1317,11 +1335,11 @@ def _handle_request(
             or [],
             **({"signal_snapshot": signal_snapshot} if has_signal_snapshot else {}),
         }
-        if execution_blocked:
+        if execution_failed:
             report_diagnostics["failure_category"] = "strategy_execution_blocked"
         finalize_runtime_report(
             report,
-            status="error" if execution_blocked else "ok",
+            status="error" if execution_failed else "ok",
             summary=report_summary,
             diagnostics=report_diagnostics,
             artifacts={
@@ -1330,15 +1348,15 @@ def _handle_request(
         )
         log_runtime_event(
             log_context,
-            "strategy_cycle_blocked" if execution_blocked else "strategy_cycle_completed",
+            "strategy_cycle_blocked" if execution_failed else "strategy_cycle_completed",
             message=(
                 "Strategy execution blocked"
-                if execution_blocked
+                if execution_failed
                 else "Strategy dry-run completed"
                 if dry_run_only_override
                 else "Strategy execution completed"
             ),
-            severity="ERROR" if execution_blocked else "INFO",
+            severity="ERROR" if execution_failed else "INFO",
             execution_window=execution_window,
             result=cycle_result.result,
             execution_status=report_summary.get("execution_status"),

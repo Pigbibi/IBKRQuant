@@ -118,6 +118,16 @@ def test_get_available_buying_power_supports_ibkr_ledger_cash_balance():
     assert get_available_buying_power(FakeIB(), 885.99, currency="USD") == 477.10
 
 
+def test_get_available_buying_power_does_not_treat_total_cash_value_as_currency_cash():
+    class FakeIB:
+        def accountValues(self):
+            return [
+                SimpleNamespace(tag="TotalCashValue", currency="USD", value="500.00"),
+            ]
+
+    assert get_available_buying_power(FakeIB(), 0.0, currency="USD") == 0.0
+
+
 def test_execute_rebalance_submits_limit_buy_for_underweight_position(monkeypatch, tmp_path):
     class FakeIB:
         def openTrades(self):

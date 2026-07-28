@@ -507,6 +507,29 @@ def test_report_with_blocked_execution_status_is_rejected_even_when_top_level_is
     assert reason == "rejected execution_status=blocked"
 
 
+@pytest.mark.parametrize(
+    "no_op_reason",
+    [
+        "pending_orders_detected:AAA",
+        "same_day_fills_detected:AAA",
+        "same_day_execution_locked:mode=live",
+    ],
+)
+def test_report_with_expected_execution_guard_is_accepted_when_top_level_is_ok(no_op_reason):
+    accepted, reason = heartbeat._is_accepted_report(
+        {
+            "status": "ok",
+            "summary": {
+                "execution_status": "blocked",
+                "no_op_reason": no_op_reason,
+            },
+        }
+    )
+
+    assert accepted is True
+    assert reason == "status=ok"
+
+
 def test_telegram_token_falls_back_to_secret_manager(monkeypatch):
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
     monkeypatch.delenv("TG_TOKEN", raising=False)

@@ -129,6 +129,29 @@ def test_fetch_portfolio_snapshot_supports_ibkr_ledger_cash_balance():
     assert snapshot.metadata["market_currency_cash"] == 477.10
 
 
+def test_fetch_portfolio_snapshot_rejects_total_cash_value_as_currency_cash():
+    class AggregateCashIB(FakeIB):
+        def positions(self):
+            return []
+
+        def accountValues(self):
+            return [
+                SimpleNamespace(account="U16608560", currency="USD", tag="NetLiquidation", value="1130"),
+                SimpleNamespace(account="U16608560", currency="USD", tag="TotalCashValue", value="500.00"),
+            ]
+
+    with pytest.raises(
+        ibkr_portfolio.IBKRPortfolioSnapshotUnavailableError,
+        match="cash balance",
+    ):
+        fetch_portfolio_snapshot(
+            AggregateCashIB(),
+            account_ids=("U16608560",),
+            wait_seconds=0,
+            currency="USD",
+        )
+
+
 def test_fetch_portfolio_snapshot_allows_negative_cash_balance():
     class NegativeCashIB(FakeIB):
         def positions(self):
