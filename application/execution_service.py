@@ -310,7 +310,13 @@ def _resolve_order_account_id(account_ids=None) -> str | None:
     return normalized[0] if normalized else None
 
 
-MARKET_CURRENCY_CASH_TAG_PRIORITY = ("CashBalance", "TotalCashBalance", "SettledCash")
+MARKET_CURRENCY_CASH_TAG_PRIORITY = (
+    "$LEDGER-CashBalance",
+    "$LEDGER-TotalCashBalance",
+    "CashBalance",
+    "TotalCashBalance",
+    "SettledCash",
+)
 
 
 def _coerce_float(value):
@@ -2251,20 +2257,31 @@ def execute_rebalance(
         buying_power=buying_power,
     )
 
-    execution_summary["execution_status"] = (
-        "executed"
-        if (
-            execution_summary["orders_submitted"]
-            or execution_summary["orders_filled"]
-            or execution_summary["orders_partially_filled"]
-            or execution_summary["option_orders_submitted"]
-            or execution_summary["option_orders_filled"]
-            or execution_summary["option_orders_partially_filled"]
-        )
-        else "no_op"
+    has_accepted_order = bool(
+        execution_summary["orders_submitted"]
+        or execution_summary["orders_filled"]
+        or execution_summary["orders_partially_filled"]
+        or execution_summary["option_orders_submitted"]
+        or execution_summary["option_orders_filled"]
+        or execution_summary["option_orders_partially_filled"]
     )
-    if execution_summary["execution_status"] == "executed":
+    submission_failure = next(
+        (
+            reason
+            for reason in execution_summary["skipped_reasons"]
+            if reason.startswith(("submit_failed:", "option_submit_failed:"))
+        ),
+        None,
+    )
+    if has_accepted_order:
+        execution_summary["execution_status"] = "executed"
         execution_summary["no_op_reason"] = None
+    elif submission_failure:
+        execution_summary["execution_status"] = "blocked"
+        execution_summary["no_op_reason"] = submission_failure
+        trade_logs.append(translator("failed", reason=submission_failure))
+    else:
+        execution_summary["execution_status"] = "no_op"
     execution_summary["residual_cash_estimate"] = float(max(buying_power, 0.0))
     append_small_account_allocation_drift_notes()
     return _finalize_result(trade_logs, execution_summary, return_summary=return_summary)

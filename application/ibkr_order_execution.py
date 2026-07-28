@@ -52,6 +52,42 @@ def _market_order_factory_with_time_in_force(
     return factory
 
 
+def probe_order_write_access(
+    ib: Any,
+    *,
+    symbol: str,
+    account_id: str,
+    stock_factory: Callable[..., Any] | None = None,
+    market_order_factory: Callable[..., Any] | None = None,
+    stock_exchange: str = "SMART",
+    stock_currency: str = "USD",
+) -> Any:
+    """Verify order-write access with an IBKR what-if order that cannot execute."""
+
+    what_if_order = getattr(ib, "whatIfOrder", None)
+    if not callable(what_if_order):
+        raise RuntimeError("IBKR connection does not support what-if orders")
+
+    normalized_symbol = str(symbol or "").strip().upper()
+    normalized_account_id = str(account_id or "").strip()
+    if not normalized_symbol or not normalized_account_id:
+        raise ValueError("IBKR what-if probe requires a symbol and account_id")
+
+    contract = _stock_factory_for_market(
+        stock_factory,
+        exchange=str(stock_exchange or "SMART").upper(),
+        currency=str(stock_currency or "USD").upper(),
+    )(normalized_symbol)
+    order = _market_order_factory_with_time_in_force(
+        market_order_factory,
+        time_in_force=DEFAULT_TIME_IN_FORCE,
+    )("BUY", 1)
+    order.account = normalized_account_id
+    order.whatIf = True
+    order.transmit = True
+    return what_if_order(contract, order)
+
+
 def submit_order_intent(
     ib: Any,
     order_intent: OrderIntent,

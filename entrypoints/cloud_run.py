@@ -35,7 +35,12 @@ def is_market_open_now(
     schedule = calendar.schedule(start_date=now_ny.date(), end_date=now_ny.date())
     if len(getattr(schedule, "index", ())) == 0:
         return False
-    return calendar.open_at_time(schedule, now_ny)
+    try:
+        return calendar.open_at_time(schedule, now_ny)
+    except ValueError as exc:
+        if "not covered by the schedule" not in str(exc):
+            raise
+        return False
 
 
 def is_market_open_today(

@@ -17,6 +17,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_ACCEPT_STATUSES = {"ok", "skipped", "success", "completed", "no_action"}
 DEFAULT_REJECT_STATUSES = {"error", "failed", "failure", "cancelled", "canceled", "timed_out"}
+DEFAULT_REJECT_EXECUTION_STATUSES = {"error", "failed", "failure"}
+EXPECTED_EXECUTION_GUARD_REASON_PREFIXES = (
+    "pending_orders_detected:",
+    "same_day_fills_detected:",
+    "same_day_execution_locked:",
+)
 DEFAULT_ACCEPT_STAGES = {
     "DRY_RUN_COMPLETED",
     "FUNDING_BLOCKED",
@@ -749,6 +755,24 @@ def _report_status(payload: dict[str, Any]) -> tuple[str, str]:
     return status, stage
 
 
+def _report_execution_status(payload: dict[str, Any]) -> str:
+    summary = payload.get("summary")
+    nested_status = summary.get("execution_status") if isinstance(summary, dict) else None
+    return str(payload.get("execution_status") or nested_status or "").strip()
+
+
+def _report_no_op_reason(payload: dict[str, Any]) -> str:
+    summary = payload.get("summary")
+    nested_reason = summary.get("no_op_reason") if isinstance(summary, dict) else None
+    return str(payload.get("no_op_reason") or nested_reason or "").strip()
+
+
+def _is_expected_execution_guard(execution_status: str, no_op_reason: str) -> bool:
+    return execution_status.lower() == "blocked" and no_op_reason.lower().startswith(
+        EXPECTED_EXECUTION_GUARD_REASON_PREFIXES
+    )
+
+
 def _payload_service_name(payload: dict[str, Any]) -> str:
     runtime_target = payload.get("runtime_target")
     service = payload.get("service_name")
@@ -806,11 +830,19 @@ def _is_accepted_report(payload: dict[str, Any]) -> tuple[bool, str]:
     status, stage = _report_status(payload)
     status_key = status.lower()
     stage_key = stage.upper()
+    execution_status = _report_execution_status(payload)
+    execution_status_key = execution_status.lower()
+    no_op_reason = _report_no_op_reason(payload)
     errors = _report_errors(payload)
     if errors and not allow_errors:
         return False, f"errors={len(errors)} status={status or '-'} stage={stage or '-'}"
     if status_key in reject_statuses or stage_key in reject_stages:
         return False, f"rejected status={status or '-'} stage={stage or '-'}"
+    if execution_status_key in DEFAULT_REJECT_EXECUTION_STATUSES or (
+        execution_status_key == "blocked"
+        and not _is_expected_execution_guard(execution_status, no_op_reason)
+    ):
+        return False, f"rejected execution_status={execution_status}"
     if status_key and status_key in accepted_statuses:
         return True, f"status={status}"
     if stage_key and stage_key in accepted_stages:

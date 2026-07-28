@@ -1102,8 +1102,11 @@ def run_strategy_core(
                 flush=True,
             )
         _record_platform_execution_telemetry(signal_metadata, dict(execution_summary or {}))
+        execution_status = str((execution_summary or {}).get("execution_status") or "").strip().lower()
+        execution_blocked = execution_status in {"blocked", "error", "failed", "failure"}
+        execution_reason = str((execution_summary or {}).get("no_op_reason") or "execution_blocked")
         return StrategyCycleResult(
-            result="OK - executed",
+            result=f"Blocked - {execution_reason}" if execution_blocked else "OK - executed",
             signal_metadata=dict(signal_metadata or {}),
             target_weights=dict(resolved_target_weights or {}),
             execution_summary=dict(execution_summary or {}),

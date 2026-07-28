@@ -4,11 +4,17 @@ import pytest
 
 from application.runtime_broker_adapters import (
     IBKRGatewayUnavailableError,
+    IBKRTradingPermissionError,
     build_runtime_broker_adapters,
 )
 
 
-def _build_adapters(*, account_ids=("U1234567",), execution_mode="paper"):
+def _build_adapters(
+    *,
+    account_ids=("U1234567",),
+    execution_mode="paper",
+    trading_permission_probe_fn=None,
+):
     return build_runtime_broker_adapters(
         host_resolver=lambda: "127.0.0.1",
         ib_port=4001,
@@ -45,6 +51,11 @@ def _build_adapters(*, account_ids=("U1234567",), execution_mode="paper"):
         strategy_display_name="Test Strategy",
         sleep_fn=lambda _seconds: None,
         printer=lambda *_args, **_kwargs: None,
+        trading_permission_probe_fn=(
+            trading_permission_probe_fn
+            if trading_permission_probe_fn is not None
+            else lambda ib: ib.whatIfOrder(None, None)
+        ),
     )
 
 
@@ -157,3 +168,187 @@ def test_connect_ib_rejects_live_mode_without_configured_account_ids():
         adapters.connect_ib()
 
     assert observed["disconnects"] == 1
+
+
+def test_connect_ib_rejects_live_gateway_read_only_mode_without_retry():
+    observed = {"disconnects": 0, "permission_probe_requests": 0}
+
+    class FakeEvent:
+        def __init__(self):
+            self.handlers = []
+
+        def __iadd__(self, handler):
+            self.handlers.append(handler)
+            return self
+
+        def __isub__(self, handler):
+            self.handlers.remove(handler)
+            return self
+
+        def emit(self, *args):
+            for handler in tuple(self.handlers):
+                handler(*args)
+
+    class FakeIB:
+        RaiseRequestErrors = False
+        RequestTimeout = 0
+
+        def __init__(self):
+            self.errorEvent = FakeEvent()
+
+        def managedAccounts(self):
+            return ["U1234567"]
+
+        def whatIfOrder(self, _contract, _order):
+            observed["permission_probe_requests"] += 1
+            self.errorEvent.emit(-1, 321, "API is in Read-Only mode", None)
+            raise TimeoutError("open orders timed out")
+
+        def disconnect(self):
+            observed["disconnects"] += 1
+
+    adapters = _build_adapters(account_ids=("U1234567",), execution_mode="live")
+    adapters = adapters.__class__(
+        **{
+            **adapters.__dict__,
+            "connect_ib_fn": lambda *_args, **_kwargs: FakeIB(),
+            "connect_attempts": 3,
+        }
+    )
+
+    with pytest.raises(IBKRTradingPermissionError, match="Read-Only"):
+        adapters.connect_ib()
+
+    assert observed == {
+        "disconnects": 1,
+        "permission_probe_requests": 1,
+    }
+
+
+def test_connect_ib_retries_when_trading_permission_probe_loses_connection():
+    observed = {
+        "connects": 0,
+        "disconnects": 0,
+        "permission_probe_requests": 0,
+        "refreshes": 0,
+    }
+
+    class FakeEvent:
+        def __init__(self):
+            self.handlers = []
+
+        def __iadd__(self, handler):
+            self.handlers.append(handler)
+            return self
+
+        def __isub__(self, handler):
+            self.handlers.remove(handler)
+            return self
+
+    class FakeIB:
+        RaiseRequestErrors = False
+        RequestTimeout = 0
+
+        def __init__(self, attempt):
+            self.attempt = attempt
+            self.errorEvent = FakeEvent()
+
+        def managedAccounts(self):
+            return ["U1234567"]
+
+        def whatIfOrder(self, _contract, _order):
+            observed["permission_probe_requests"] += 1
+            if self.attempt == 1:
+                raise ConnectionError("gateway connection dropped")
+            return []
+
+        def disconnect(self):
+            observed["disconnects"] += 1
+
+    def connect(*_args, **_kwargs):
+        observed["connects"] += 1
+        return FakeIB(observed["connects"])
+
+    def refresh_host():
+        observed["refreshes"] += 1
+        return "127.0.0.1"
+
+    adapters = _build_adapters(account_ids=("U1234567",), execution_mode="live")
+    adapters = adapters.__class__(
+        **{
+            **adapters.__dict__,
+            "connect_ib_fn": connect,
+            "connect_attempts": 2,
+            "refresh_host_fn": refresh_host,
+        }
+    )
+
+    assert adapters.connect_ib().managedAccounts() == ["U1234567"]
+    assert observed == {
+        "connects": 2,
+        "disconnects": 1,
+        "permission_probe_requests": 2,
+        "refreshes": 1,
+    }
+
+
+def test_connect_ib_does_not_misclassify_unrelated_321_as_read_only():
+    class FakeEvent:
+        def __init__(self):
+            self.handlers = []
+
+        def __iadd__(self, handler):
+            self.handlers.append(handler)
+            return self
+
+        def __isub__(self, handler):
+            self.handlers.remove(handler)
+            return self
+
+        def emit(self, *args):
+            for handler in tuple(self.handlers):
+                handler(*args)
+
+    class FakeIB:
+        RaiseRequestErrors = False
+        RequestTimeout = 0
+
+        def __init__(self):
+            self.errorEvent = FakeEvent()
+
+        def managedAccounts(self):
+            return ["U1234567"]
+
+        def whatIfOrder(self, _contract, _order):
+            self.errorEvent.emit(-1, 321, "Generic validation error", None)
+            return SimpleNamespace(warningText="")
+
+    adapters = _build_adapters(account_ids=("U1234567",), execution_mode="live")
+    adapters = adapters.__class__(
+        **{
+            **adapters.__dict__,
+            "connect_ib_fn": lambda *_args, **_kwargs: FakeIB(),
+        }
+    )
+
+    assert adapters.connect_ib().managedAccounts() == ["U1234567"]
+
+
+def test_connect_ib_skips_trading_permission_probe_for_dry_run():
+    class FakeIB:
+        def managedAccounts(self):
+            return ["U1234567"]
+
+        def whatIfOrder(self, _contract, _order):
+            pytest.fail("dry-run connection must not probe trading permissions")
+
+    adapters = _build_adapters(account_ids=("U1234567",), execution_mode="live")
+    adapters = adapters.__class__(
+        **{
+            **adapters.__dict__,
+            "connect_ib_fn": lambda *_args, **_kwargs: FakeIB(),
+            "dry_run_only": True,
+        }
+    )
+
+    assert adapters.connect_ib().managedAccounts() == ["U1234567"]
