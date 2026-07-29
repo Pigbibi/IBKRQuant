@@ -1,6 +1,11 @@
 import json
 
-from application.rebalance_service import _resolve_reconciliation_mode, _strategy_dashboard_text, run_strategy_core
+from application.rebalance_service import (
+    _resolve_reconciliation_mode,
+    _should_record_execution_marker,
+    _strategy_dashboard_text,
+    run_strategy_core,
+)
 from application.runtime_dependencies import IBKRRebalanceConfig
 from notifications.renderers import (
     _build_notification_trade_lines,
@@ -76,6 +81,86 @@ def _build_test_translator():
         return template.format(**kwargs) if kwargs else template
 
     return translate
+
+
+def test_execution_marker_is_not_recorded_for_blocked_execution_with_trade_logs():
+    config = IBKRRebalanceConfig(
+        translator=_build_test_translator(),
+        separator="---",
+        execution_dedup_enabled=True,
+    )
+
+    assert not _should_record_execution_marker(
+        trade_logs=("broker submission failed",),
+        execution_summary={
+            "execution_status": "blocked",
+            "orders_skipped": [{"reason": "submit_failed"}],
+        },
+        config=config,
+    )
+
+
+def test_execution_marker_is_recorded_after_accepted_order():
+    config = IBKRRebalanceConfig(
+        translator=_build_test_translator(),
+        separator="---",
+        execution_dedup_enabled=True,
+    )
+
+    assert _should_record_execution_marker(
+        trade_logs=("order submitted",),
+        execution_summary={
+            "execution_status": "executed",
+            "orders_submitted": [{"symbol": "AAA", "status": "Submitted"}],
+        },
+        config=config,
+    )
+
+
+def test_execution_marker_is_recorded_after_partial_submission_success():
+    config = IBKRRebalanceConfig(
+        translator=_build_test_translator(),
+        separator="---",
+        execution_dedup_enabled=True,
+    )
+
+    assert _should_record_execution_marker(
+        trade_logs=("one order submitted", "one order rejected"),
+        execution_summary={
+            "execution_status": "executed",
+            "orders_submitted": [{"symbol": "AAA", "status": "Submitted"}],
+            "skipped_reasons": ["submit_failed:BBB:Rejected"],
+        },
+        config=config,
+    )
+
+
+def test_execution_marker_preserves_legacy_trade_log_fallback():
+    config = IBKRRebalanceConfig(
+        translator=_build_test_translator(),
+        separator="---",
+        execution_dedup_enabled=True,
+    )
+
+    assert _should_record_execution_marker(
+        trade_logs=("legacy order submitted",),
+        execution_summary=None,
+        config=config,
+    )
+
+
+def test_execution_marker_preserves_legacy_trade_log_fallback_with_minimal_summary():
+    config = IBKRRebalanceConfig(
+        translator=_build_test_translator(),
+        separator="---",
+        execution_dedup_enabled=True,
+    )
+
+    assert _should_record_execution_marker(
+        trade_logs=("legacy order submitted",),
+        execution_summary={"adapter_metadata": {"source": "legacy"}},
+        config=config,
+    )
 
 
 def test_build_dashboard_localizes_strategy_details():

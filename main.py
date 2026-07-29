@@ -65,8 +65,9 @@ from quant_platform_kit.ibkr import (
     ensure_event_loop as ibkr_ensure_event_loop,
     fetch_historical_price_candles,
     fetch_historical_price_series,
-    fetch_quote_snapshots,
+    fetch_quote_snapshots as qpk_fetch_quote_snapshots,
 )
+from application.ibkr_market_data import fetch_quote_snapshots_with_expected_error_summary
 from application.ibkr_order_execution import probe_order_write_access, submit_order_intent
 from application.monitor_dispatcher import (
     dispatch_due_monitor_targets,
@@ -524,9 +525,10 @@ def fetch_market_fallback_historical_candles(symbol, **kwargs):
 
 
 def fetch_market_quote_snapshots(ib, symbols, **kwargs):
-    return fetch_quote_snapshots(
+    return fetch_quote_snapshots_with_expected_error_summary(
         ib,
         symbols,
+        fetch_quote_snapshots=qpk_fetch_quote_snapshots,
         exchange=MARKET_EXCHANGE,
         currency=MARKET_CURRENCY,
         **kwargs,

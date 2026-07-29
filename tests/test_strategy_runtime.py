@@ -1056,7 +1056,13 @@ def test_value_target_runtime_builds_semiconductor_inputs(monkeypatch):
         logger=lambda _message: None,
     )
 
-    portfolio_snapshot = SimpleNamespace(total_equity=50000.0)
+    portfolio_snapshot = PortfolioSnapshot(
+        as_of=strategy_runtime_module.pd.Timestamp("2026-04-01").to_pydatetime(),
+        total_equity=50000.0,
+        buying_power=50000.0,
+        cash_balance=50000.0,
+        positions=(),
+    )
     monkeypatch.setattr(strategy_runtime_module, "fetch_portfolio_snapshot", lambda _ib: portfolio_snapshot)
 
     def fake_loader(_ib, symbol, duration="2 Y", bar_size="1 day"):
@@ -1079,7 +1085,8 @@ def test_value_target_runtime_builds_semiconductor_inputs(monkeypatch):
     assert captured["market_data"]["derived_indicators"]["soxl"]["ma_trend"] == 100.0
     assert captured["market_data"]["derived_indicators"]["soxx"]["price"] == 200.0
     assert "realized_volatility_10" in captured["market_data"]["derived_indicators"]["soxx"]
-    assert captured["portfolio"] is portfolio_snapshot
+    assert captured["portfolio"].total_equity == portfolio_snapshot.total_equity
+    assert captured["portfolio"].metadata["consecutive_losses"] == 0
     assert "pacing_sec" not in captured["runtime_config"]
     assert captured["runtime_config"]["signal_effective_after_trading_days"] == 1
     assert result.metadata["portfolio_total_equity"] == 50000.0
@@ -1137,7 +1144,13 @@ def test_value_target_runtime_builds_tqqq_inputs(monkeypatch):
         logger=lambda _message: None,
     )
 
-    portfolio_snapshot = SimpleNamespace(total_equity=50000.0)
+    portfolio_snapshot = PortfolioSnapshot(
+        as_of=strategy_runtime_module.pd.Timestamp("2026-04-01").to_pydatetime(),
+        total_equity=50000.0,
+        buying_power=50000.0,
+        cash_balance=50000.0,
+        positions=(),
+    )
     monkeypatch.setattr(strategy_runtime_module, "fetch_portfolio_snapshot", lambda _ib: portfolio_snapshot)
 
     def fake_candle_loader(_ib, symbol, duration="2 Y", bar_size="1 day"):
@@ -1171,7 +1184,8 @@ def test_value_target_runtime_builds_tqqq_inputs(monkeypatch):
 
     assert len(captured["market_data"]["benchmark_history"]) == 220
     assert captured["market_data"]["benchmark_history"][0]["high"] == 101.0
-    assert captured["portfolio"] is portfolio_snapshot
+    assert captured["portfolio"].total_equity == portfolio_snapshot.total_equity
+    assert captured["portfolio"].metadata["consecutive_losses"] == 0
     assert "pacing_sec" not in captured["runtime_config"]
     assert captured["runtime_config"]["signal_effective_after_trading_days"] == 1
     assert result.metadata["portfolio_total_equity"] == 50000.0

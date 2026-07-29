@@ -18,6 +18,7 @@ def test_cloud_run_route_contracts_are_registered(strategy_module):
         "/probe": ["GET", "POST"],
         "/monitor-dispatch": ["GET", "POST"],
         "/health": ["GET"],
+        "/healthz": ["GET"],
         "/static/<path:filename>": ["GET"],
     }
 
@@ -1128,25 +1129,36 @@ def test_run_strategy_core_allows_multiple_runs_in_same_process(strategy_module,
     first = strategy_module.run_strategy_core()
     second = strategy_module.run_strategy_core()
 
-    assert first.result == "OK - heartbeat"
-    assert second.result == "OK - heartbeat"
+    assert first.result == "OK - no-op"
+    assert second.result == "OK - no-op"
     assert observed["connect_calls"] == 2
     assert observed["disconnect_calls"] == 2
+    assert observed["messages"] == []
 
 
-def test_send_tg_message_logs_non_200_response(strategy_module, monkeypatch, capsys):
-    class FakeResponse:
-        status_code = 401
-        text = "unauthorized"
-
+def test_send_tg_message_uses_cycle_channel_sender(strategy_module, monkeypatch):
+    observed = {}
     monkeypatch.setattr(strategy_module, "TG_TOKEN", "token")
     monkeypatch.setattr(strategy_module, "TG_CHAT_ID", "chat-id")
-    monkeypatch.setattr(strategy_module.requests, "post", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(
+        "quant_platform_kit.notifications.cycle_channel.build_cycle_sender",
+        lambda **kwargs: (
+            observed.setdefault("sender_config", kwargs),
+            lambda message: observed.setdefault("message", message),
+        )[1],
+    )
 
     strategy_module.send_tg_message("hello")
 
-    captured = capsys.readouterr()
-    assert "Telegram send failed with status 401: unauthorized" in captured.out
+    assert observed == {
+        "sender_config": {
+            "channel": "telegram",
+            "telegram_token": "token",
+            "telegram_chat_id": "chat-id",
+            "webhook_url": None,
+        },
+        "message": "hello",
+    }
 
 
 def test_global_telegram_chat_id_is_used(strategy_module_factory):

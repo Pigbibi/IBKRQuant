@@ -1,5 +1,4 @@
 import asyncio
-import types
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -111,27 +110,15 @@ def test_get_ib_host_resolves_lazily(strategy_module_factory, monkeypatch):
 
     assert module.IB_HOST is None
 
-    fake_instance = types.SimpleNamespace(
-        network_interfaces=[
-            types.SimpleNamespace(
-                access_configs=[types.SimpleNamespace(nat_i_p="35.211.181.174")],
-                network_i_p="10.0.0.8",
-            )
-        ]
-    )
-
-    class FakeInstancesClient:
-        def get(self, project, zone, instance):
-            assert project == "test-project"
+    class FakeComputeDiscovery:
+        def resolve_instance_ip(self, instance, zone, *, project_id, prefer_internal):
+            assert project_id == "test-project"
             assert zone == "us-central1-a"
             assert instance == "ib-gateway"
-            return fake_instance
+            assert prefer_internal is True
+            return "10.0.0.8"
 
-    monkeypatch.setattr(
-        module,
-        "compute_v1",
-        types.SimpleNamespace(InstancesClient=FakeInstancesClient),
-    )
+    monkeypatch.setattr(module, "get_compute_discovery", FakeComputeDiscovery)
     monkeypatch.setattr(module, "get_project_id", lambda: "test-project")
 
     assert module.get_ib_host() == "10.0.0.8"
@@ -207,27 +194,15 @@ def test_ib_gateway_mode_is_required(strategy_module_factory):
 
 
 def test_resolve_gce_instance_ip_prefers_internal_by_default(strategy_module, monkeypatch):
-    fake_instance = types.SimpleNamespace(
-        network_interfaces=[
-            types.SimpleNamespace(
-                access_configs=[types.SimpleNamespace(nat_i_p="35.211.181.174")],
-                network_i_p="10.0.0.8",
-            )
-        ]
-    )
-
-    class FakeInstancesClient:
-        def get(self, project, zone, instance):
-            assert project == "test-project"
+    class FakeComputeDiscovery:
+        def resolve_instance_ip(self, instance, zone, *, project_id, prefer_internal):
+            assert project_id == "test-project"
             assert zone == "us-central1-a"
             assert instance == "ib-gateway"
-            return fake_instance
+            assert prefer_internal is True
+            return "10.0.0.8"
 
-    monkeypatch.setattr(
-        strategy_module,
-        "compute_v1",
-        types.SimpleNamespace(InstancesClient=FakeInstancesClient),
-    )
+    monkeypatch.setattr(strategy_module, "get_compute_discovery", FakeComputeDiscovery)
     monkeypatch.setattr(strategy_module, "get_project_id", lambda: "test-project")
     monkeypatch.delenv("IB_GATEWAY_IP_MODE", raising=False)
 
@@ -237,27 +212,15 @@ def test_resolve_gce_instance_ip_prefers_internal_by_default(strategy_module, mo
 
 
 def test_resolve_gce_instance_ip_can_use_external_mode(strategy_module, monkeypatch):
-    fake_instance = types.SimpleNamespace(
-        network_interfaces=[
-            types.SimpleNamespace(
-                access_configs=[types.SimpleNamespace(nat_i_p="35.211.181.174")],
-                network_i_p="10.0.0.8",
-            )
-        ]
-    )
-
-    class FakeInstancesClient:
-        def get(self, project, zone, instance):
-            assert project == "test-project"
+    class FakeComputeDiscovery:
+        def resolve_instance_ip(self, instance, zone, *, project_id, prefer_internal):
+            assert project_id == "test-project"
             assert zone == "us-central1-a"
             assert instance == "ib-gateway"
-            return fake_instance
+            assert prefer_internal is False
+            return "35.211.181.174"
 
-    monkeypatch.setattr(
-        strategy_module,
-        "compute_v1",
-        types.SimpleNamespace(InstancesClient=FakeInstancesClient),
-    )
+    monkeypatch.setattr(strategy_module, "get_compute_discovery", FakeComputeDiscovery)
     monkeypatch.setattr(strategy_module, "get_project_id", lambda: "test-project")
     monkeypatch.setenv("IB_GATEWAY_IP_MODE", "external")
 

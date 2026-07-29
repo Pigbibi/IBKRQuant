@@ -137,6 +137,12 @@ def install_stub_modules():
         notify_lang="en",
         tg_token=None,
         tg_chat_id="chat-id",
+        notification_channel="telegram",
+        wecom_webhook_url=None,
+        dingtalk_webhook_url=None,
+        feishu_webhook_url=None,
+        serverchan_webhook_url=None,
+        strategy_metadata=None,
         ibkr_feature_snapshot_manifest_path=None,
         ibkr_reconciliation_output_path=None,
         market_hours_source="cloud_run",
@@ -194,7 +200,7 @@ class IBRKConnectTimeoutAlertTests(unittest.TestCase):
 
             module.is_market_open_now = lambda **_kwargs: True
             module.run_strategy_core = lambda **_kwargs: (_ for _ in ()).throw(
-                TimeoutError("IBKR API handshake timed out")
+                module.IBKRGatewayUnavailableError("IBKR API handshake timed out")
             )
             module.persist_execution_report = lambda report: observed.setdefault("report", dict(report)) or "/tmp/report.json"
             module.publish_notification = lambda *, detailed_text, compact_text: observed["messages"].append(
@@ -205,7 +211,7 @@ class IBRKConnectTimeoutAlertTests(unittest.TestCase):
             with module.app.test_request_context("/", method="POST"):
                 body, status = module.handle_request()
 
-        self.assertEqual(status, 500)
+        self.assertEqual(status, 503)
         self.assertEqual(body, "Error")
         self.assertEqual(observed["report"]["errors"][0]["stage"], "ibkr_connect")
         self.assertIn("IBKR 连接异常", observed["messages"][0][0])
