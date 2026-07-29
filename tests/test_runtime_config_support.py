@@ -1261,7 +1261,11 @@ def test_build_cloud_run_env_sync_plan_generates_live_gateway_deadlines() -> Non
         check=True,
         capture_output=True,
         text=True,
-        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+        env={
+            **os.environ,
+            "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload),
+            "IBKR_EXECUTION_DEDUP_ENABLED": "true",
+        },
     )
 
     plan = json.loads(result.stdout)
@@ -1269,6 +1273,7 @@ def test_build_cloud_run_env_sync_plan_generates_live_gateway_deadlines() -> Non
     gateway_accounts = ("u15998061", "u16608560", "u18336562", "u18308207")
     for account in gateway_accounts:
         service_name = f"interactive-brokers-quant-live-{account}-service"
+        assert by_service[service_name]["env"]["IBKR_EXECUTION_DEDUP_ENABLED"] == "true"
         assert by_service[service_name]["scheduler"] == {
             "timezone": "America/New_York",
             "main_time": "45 15 * * 1-5",
@@ -1284,6 +1289,66 @@ def test_build_cloud_run_env_sync_plan_generates_live_gateway_deadlines() -> Non
         "35 9,15 * * *"
     )
     assert "attempt_deadline" not in by_service["interactive-brokers-us-combo-shadow-service"]["scheduler"]
+
+
+def test_build_cloud_run_env_sync_plan_does_not_enable_live_dedup_implicitly() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    plan = json.loads(result.stdout)
+    for target in plan["targets"]:
+        assert "IBKR_EXECUTION_DEDUP_ENABLED" not in target["env"]
+        assert "IBKR_EXECUTION_DEDUP_ENABLED" in target["remove_env_vars"]
+
+
+def test_build_cloud_run_env_sync_plan_honors_explicit_dedup_override() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    payload["targets"][0]["runtime_target"]["overrides"] = {
+        "IBKR_EXECUTION_DEDUP_ENABLED": False,
+    }
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    plan = json.loads(result.stdout)
+    by_service = {target["service_name"]: target for target in plan["targets"]}
+    assert (
+        by_service["interactive-brokers-quant-live-u15998061-service"]["env"][
+            "IBKR_EXECUTION_DEDUP_ENABLED"
+        ]
+        == "false"
+    )
+
+
+def test_build_cloud_run_env_sync_plan_honors_global_dedup_env() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload),
+            "IBKR_EXECUTION_DEDUP_ENABLED": "false",
+        },
+    )
+
+    plan = json.loads(result.stdout)
+    assert {
+        target["env"]["IBKR_EXECUTION_DEDUP_ENABLED"]
+        for target in plan["targets"]
+    } == {"false"}
 
 
 def test_build_cloud_run_env_sync_plan_accepts_strategy_defined_gateway_schedule() -> None:

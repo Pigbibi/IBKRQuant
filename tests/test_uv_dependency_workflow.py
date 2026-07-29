@@ -21,7 +21,7 @@ def test_ci_docker_and_env_sync_use_uv_lock() -> None:
     assert lockfile.startswith("version = ")
     assert "uv sync --frozen --extra test" in ci
     assert "uv run --no-sync ruff check --exclude external ." in ci
-    assert "uv run --no-sync python scripts/check_qpk_pin_consistency.py" in ci
+    assert "uv run --no-sync python external/QuantPlatformKit/scripts/check_qpk_pin_consistency.py" in ci
     assert "uv sync --frozen --no-dev" in env_sync
     assert "uv run --no-sync python scripts/build_cloud_run_env_sync_plan.py --json" in env_sync
     assert "COPY . ." in dockerfile

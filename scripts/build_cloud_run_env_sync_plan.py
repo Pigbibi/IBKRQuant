@@ -69,6 +69,7 @@ SHARED_TARGET_FALLBACK_ENV = frozenset(
         "IBKR_MARKET_TIMEZONE",
         "IB_GATEWAY_ZONE",
         "IB_GATEWAY_IP_MODE",
+        "IBKR_EXECUTION_DEDUP_ENABLED",
         "EXECUTION_REPORT_GCS_URI",
     }
 )
@@ -97,6 +98,7 @@ PLATFORM_GENERIC_ENV = (
     "IBKR_STRATEGY_PLUGIN_MOUNTS_JSON",
     "IBKR_RECONCILIATION_OUTPUT_PATH",
     "IBKR_DRY_RUN_ONLY",
+    "IBKR_EXECUTION_DEDUP_ENABLED",
     "IBKR_PAPER_LIQUIDATE_ONLY",
     "IBKR_MIN_RESERVED_CASH_USD",
     "IBKR_RESERVED_CASH_RATIO",
@@ -429,10 +431,13 @@ def _build_target_plan(
             value = strategy_defaults.get(name)
         # 4. Override from RUNTIME_TARGET_JSON.overrides
         if value is None and isinstance(overrides, Mapping):
-            override_value = overrides.get(name) or overrides.get(name.lower())
+            override_value = (
+                overrides[name]
+                if name in overrides
+                else overrides.get(name.lower())
+            )
             if override_value is not None:
                 value = _coerce_env_value(override_value)
-
         if value is None:
             remove_env_vars.append(name)
         else:

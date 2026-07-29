@@ -700,10 +700,39 @@ def _execution_already_recorded_message(*, config: IBKRRebalanceConfig, signal_m
 def _should_record_execution_marker(*, trade_logs, execution_summary, config: IBKRRebalanceConfig) -> bool:
     if not getattr(config, "execution_dedup_enabled", False):
         return False
-    if tuple(trade_logs or ()):
-        return True
+    if execution_summary is None:
+        return bool(tuple(trade_logs or ()))
     summary = dict(execution_summary or {})
-    return bool(summary.get("action_done")) or int(summary.get("orders_previewed_count") or 0) > 0
+    execution_status = str(summary.get("execution_status") or "").strip().lower()
+    if execution_status in {"blocked", "error", "failed", "failure"}:
+        return False
+    accepted_order_keys = (
+        "orders_submitted",
+        "orders_filled",
+        "orders_partially_filled",
+        "option_orders_submitted",
+        "option_orders_filled",
+        "option_orders_partially_filled",
+    )
+    has_structured_execution_result = any(
+        key in summary
+        for key in (
+            "execution_status",
+            "action_done",
+            "orders_previewed_count",
+            *accepted_order_keys,
+        )
+    )
+    return (
+        execution_status == "executed"
+        or any(tuple(summary.get(key) or ()) for key in accepted_order_keys)
+        or bool(summary.get("action_done"))
+        or int(summary.get("orders_previewed_count") or 0) > 0
+        or (
+            not has_structured_execution_result
+            and bool(tuple(trade_logs or ()))
+        )
+    )
 
 
 def _record_execution_marker(
