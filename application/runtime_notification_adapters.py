@@ -17,13 +17,18 @@ class IBKRNotificationAdapters:
     cycle_publisher: NotificationPublisher
     delivery_events: list[dict[str, Any]]
 
-    def publish_cycle_notification(self, *, detailed_text: str, compact_text: str) -> None:
-        self.cycle_publisher.publish(
+    def publish_cycle_notification(self, *, detailed_text: str, compact_text: str) -> bool:
+        before_count = len(self.delivery_events)
+        outcome = self.cycle_publisher.publish(
             RenderedNotification(
                 detailed_text=detailed_text,
                 compact_text=compact_text,
             )
         )
+        deliveries = self.delivery_events[before_count:]
+        if deliveries:
+            return all(event.get("delivery_status") == "sent" for event in deliveries)
+        return outcome is not False
 
 
 def build_runtime_notification_adapters(
@@ -35,17 +40,34 @@ def build_runtime_notification_adapters(
 ) -> IBKRNotificationAdapters:
     recorded_delivery_events = delivery_events if delivery_events is not None else []
 
-    def send_recorded_message(message: str) -> None:
-        send_message(message)
+    def send_recorded_message(message: str) -> bool:
         compact = str(message or "")
-        recorded_delivery_events.append(
+        event = {
+            "sink": notification_channel,
+            "compact_text_sha256": hashlib.sha256(compact.encode("utf-8")).hexdigest(),
+            "compact_text_length": len(compact),
+        }
+        try:
+            outcome = send_message(message)
+        except Exception as exc:
+            event.update(
+                {
+                    "delivery_status": "failed",
+                    "transport_acknowledged": False,
+                    "error_type": type(exc).__name__,
+                }
+            )
+            recorded_delivery_events.append(event)
+            return False
+        acknowledged = outcome is not False
+        event.update(
             {
-                "sink": notification_channel,
-                "delivery_status": "sent",
-                "compact_text_sha256": hashlib.sha256(compact.encode("utf-8")).hexdigest(),
-                "compact_text_length": len(compact),
+                "delivery_status": "sent" if acknowledged else "failed",
+                "transport_acknowledged": acknowledged,
             }
         )
+        recorded_delivery_events.append(event)
+        return acknowledged
 
     return IBKRNotificationAdapters(
         notification_port=CallableNotificationPort(send_recorded_message),

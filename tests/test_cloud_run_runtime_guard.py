@@ -157,6 +157,54 @@ def test_scheduler_entry_since_uses_matching_service_revision_window():
     )
 
 
+def test_scheduler_failure_matching_cloud_run_failure_is_duplicate():
+    scheduler_entry = {
+        "timestamp": "2026-07-29T19:45:03Z",
+        "resource": {"labels": {"job_id": "test-scheduler"}},
+    }
+    cloud_run_failures = {
+        "test-service": [
+            {
+                "timestamp": "2026-07-29T19:45:01Z",
+                "resource": {"labels": {"service_name": "test-service"}},
+            }
+        ]
+    }
+
+    assert guard._is_duplicate_scheduler_failure(
+        scheduler_entry,
+        cloud_run_failures,
+    )
+
+
+def test_scheduler_failure_for_other_service_is_not_duplicate():
+    scheduler_entry = {
+        "timestamp": "2026-07-29T19:45:03Z",
+        "resource": {"labels": {"job_id": "other-platform-scheduler"}},
+    }
+    cloud_run_failures = {
+        "test-service": [
+            {
+                "timestamp": "2026-07-29T19:45:01Z",
+                "resource": {"labels": {"service_name": "test-service"}},
+            }
+        ]
+    }
+
+    assert not guard._is_duplicate_scheduler_failure(
+        scheduler_entry,
+        cloud_run_failures,
+    )
+
+
+def test_services_without_success_are_reported_individually():
+    assert guard._services_without_success(
+        ["healthy-service", "silent-service"],
+        {"healthy-service": 1, "silent-service": 0},
+        {"healthy-service", "silent-service"},
+    ) == ["silent-service"]
+
+
 def test_monitor_dispatch_capacity_warning_is_not_failure_by_default(monkeypatch):
     monkeypatch.delenv("RUNTIME_GUARD_IGNORE_MONITOR_DISPATCH_CAPACITY_WARNINGS", raising=False)
     entry = {

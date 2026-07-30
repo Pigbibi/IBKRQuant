@@ -14,6 +14,27 @@ import urllib.request
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+try:
+    from scripts.runtime_heartbeat_policy import (
+        filter_due_targets,
+        filter_services_for_targets,
+        load_runtime_targets,
+        match_payload_target,
+        target_key,
+        target_label,
+        target_latest_due_at,
+    )
+except ModuleNotFoundError:
+    from runtime_heartbeat_policy import (  # type: ignore[no-redef]
+        filter_due_targets,
+        filter_services_for_targets,
+        load_runtime_targets,
+        match_payload_target,
+        target_key,
+        target_label,
+        target_latest_due_at,
+    )
+
 
 DEFAULT_ACCEPT_STATUSES = {"ok", "skipped", "success", "completed", "no_action"}
 DEFAULT_REJECT_STATUSES = {"error", "failed", "failure", "cancelled", "canceled", "timed_out"}
@@ -755,6 +776,20 @@ def _report_status(payload: dict[str, Any]) -> tuple[str, str]:
     return status, stage
 
 
+def _report_notification_failure(payload: dict[str, Any]) -> str:
+    scopes = [payload]
+    summary = payload.get("summary")
+    if isinstance(summary, dict):
+        scopes.append(summary)
+    for scope in scopes:
+        delivery_summary = scope.get("notification_delivery_summary")
+        if isinstance(delivery_summary, dict) and delivery_summary.get("all_acknowledged") is False:
+            return "notification delivery not acknowledged"
+        if scope.get("notification_error") and scope.get("notification_suppressed") is not True:
+            return "notification delivery failed"
+    return ""
+
+
 def _report_execution_status(payload: dict[str, Any]) -> str:
     summary = payload.get("summary")
     nested_status = summary.get("execution_status") if isinstance(summary, dict) else None
@@ -789,7 +824,12 @@ def _payload_account_scope(payload: dict[str, Any]) -> str:
     return ""
 
 
-def _payload_matches(payload: dict[str, Any], required_services: list[str]) -> tuple[bool, str, str]:
+def _payload_matches(
+    payload: dict[str, Any],
+    required_services: list[str],
+    *,
+    required_targets: list[dict[str, Any]] | None = None,
+) -> tuple[bool, str, str]:
     expected_platform = (os.environ.get("RUNTIME_HEARTBEAT_REPORT_PLATFORM") or "").strip().lower()
     if expected_platform:
         platform = str(payload.get("platform") or "").strip().lower()
@@ -805,6 +845,16 @@ def _payload_matches(payload: dict[str, Any], required_services: list[str]) -> t
     service_name = _payload_service_name(payload)
     if required_services and service_name not in required_services:
         return False, service_name, f"service_name={service_name or '-'}"
+    if required_targets:
+        matched_target, reason = match_payload_target(payload, required_targets)
+        if matched_target:
+            return True, matched_target, reason
+        target_services = {
+            str(target.get("service") or "").strip()
+            for target in required_targets
+        }
+        if service_name in target_services:
+            return False, service_name, reason
     return True, service_name, "matched filters"
 
 
@@ -834,8 +884,11 @@ def _is_accepted_report(payload: dict[str, Any]) -> tuple[bool, str]:
     execution_status_key = execution_status.lower()
     no_op_reason = _report_no_op_reason(payload)
     errors = _report_errors(payload)
+    notification_failure = _report_notification_failure(payload)
     if errors and not allow_errors:
         return False, f"errors={len(errors)} status={status or '-'} stage={stage or '-'}"
+    if notification_failure:
+        return False, notification_failure
     if status_key in reject_statuses or stage_key in reject_stages:
         return False, f"rejected status={status or '-'} stage={stage or '-'}"
     if execution_status_key in DEFAULT_REJECT_EXECUTION_STATUSES or (
@@ -935,10 +988,30 @@ def main(now: dt.datetime | None = None) -> int:
         now = now.replace(tzinfo=dt.timezone.utc)
     now = now.astimezone(dt.timezone.utc)
     since = now - dt.timedelta(hours=lookback_hours)
-    runtime_target_skip_reason = _runtime_target_scheduler_skip_reason(since, now)
-    if runtime_target_skip_reason:
-        print(f"Execution report heartbeat skipped for {name}: {runtime_target_skip_reason}")
+    runtime_targets = load_runtime_targets(os.environ)
+    due_targets, target_schedule_evaluated = filter_due_targets(
+        runtime_targets,
+        since=since,
+        now=now,
+        market_aware=_env_bool("RUNTIME_HEARTBEAT_MARKET_AWARE", True),
+    )
+    if runtime_targets and target_schedule_evaluated and not due_targets:
+        target_names = ", ".join(target_label(target) for target in runtime_targets)
+        schedule_reason = _runtime_target_scheduler_skip_reason(since, now)
+        print(
+            f"Execution report heartbeat skipped for {name}: "
+            + (
+                schedule_reason
+                or "no runtime target main schedule was due on an open market session "
+                f"({target_names})"
+            )
+        )
         return 0
+    if not runtime_targets:
+        runtime_target_skip_reason = _runtime_target_scheduler_skip_reason(since, now)
+        if runtime_target_skip_reason:
+            print(f"Execution report heartbeat skipped for {name}: {runtime_target_skip_reason}")
+            return 0
 
     required_services, scheduler_skip_reason, _scheduler_checked = _resolve_required_services(
         project=project,
@@ -948,6 +1021,37 @@ def main(now: dt.datetime | None = None) -> int:
     if scheduler_skip_reason:
         print(f"Execution report heartbeat skipped for {name}: {scheduler_skip_reason}")
         return 0
+    if due_targets:
+        required_services = filter_services_for_targets(
+            required_services,
+            due_targets,
+            all_targets=runtime_targets,
+        )
+    required_targets = [
+        target
+        for target in due_targets
+        if not required_services or str(target.get("service") or "").strip() in required_services
+    ]
+    required_keys = [target_key(target) for target in required_targets]
+    required_labels = {
+        target_key(target): target_label(target)
+        for target in required_targets
+    }
+    required_due_at = {
+        target_key(target): due_at
+        for target in required_targets
+        if (due_at := target_latest_due_at(target)) is not None
+    }
+    target_services = {
+        str(target.get("service") or "").strip()
+        for target in required_targets
+    }
+    for service in required_services:
+        if service not in target_services:
+            required_keys.append(service)
+            required_labels[service] = service
+    if required_keys:
+        max_reports = max(max_reports, min(200, len(required_keys) * 4))
     globs = _report_globs(since, now)
     if not globs:
         raise SystemExit("No heartbeat GCS report URI configured")
@@ -973,23 +1077,35 @@ def main(now: dt.datetime | None = None) -> int:
         if payload is None:
             inspected.append(f"- {updated.isoformat()} {uri} unreadable")
             continue
-        matches, service_name, filter_reason = _payload_matches(payload, required_services)
+        matches, service_name, filter_reason = _payload_matches(
+            payload,
+            required_services,
+            required_targets=required_targets,
+        )
         if not matches:
             inspected.append(f"- {updated.isoformat()} {uri} skipped {filter_reason}")
+            continue
+        latest_due_at = required_due_at.get(service_name)
+        if latest_due_at is not None and updated < latest_due_at:
+            inspected.append(
+                f"- {updated.isoformat()} {uri} skipped "
+                f"predates latest due schedule {latest_due_at.isoformat()}"
+            )
             continue
         ok, reason = _is_accepted_report(payload)
         inspected.append(f"- {updated.isoformat()} {uri} {reason}")
         if ok:
-            if required_services:
+            if required_keys:
                 accepted_by_service[service_name] = (uri, updated, reason)
             else:
                 accepted.append((uri, updated, reason))
 
-    if required_services:
-        missing = [service for service in required_services if service not in accepted_by_service]
+    if required_keys:
+        missing = [key for key in required_keys if key not in accepted_by_service]
         if not missing:
             details = ", ".join(
-                f"{service}@{accepted_by_service[service][1].isoformat()}" for service in required_services
+                f"{required_labels[key]}@{accepted_by_service[key][1].isoformat()}"
+                for key in required_keys
             )
             print(f"Execution report heartbeat OK for {name}: {details}")
             return 0
@@ -1005,9 +1121,12 @@ def main(now: dt.datetime | None = None) -> int:
         issues.extend(f"list failed: {item}" for item in list_errors[:3])
     if not sorted_objects:
         issues.append(f"no report object updated in the last {lookback_hours:g} hours")
-    elif required_services:
-        missing = [service for service in required_services if service not in accepted_by_service]
-        issues.append(f"missing acceptable report for service(s): {', '.join(missing)}")
+    elif required_keys:
+        missing = [key for key in required_keys if key not in accepted_by_service]
+        issues.append(
+            "missing acceptable report for runtime target(s): "
+            + ", ".join(required_labels[key] for key in missing)
+        )
     else:
         issues.append(f"no acceptable report among {min(len(sorted_objects), max_reports)} recent report object(s)")
 

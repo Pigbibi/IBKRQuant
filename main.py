@@ -701,7 +701,7 @@ def send_tg_message(message):
         telegram_chat_id=TG_CHAT_ID,
         webhook_url=_NOTIFICATION_WEBHOOK_URL,
     )
-    sender(_with_platform_notification_prefix(message))
+    return sender(_with_platform_notification_prefix(message))
 
 
 def _platform_notification_prefix() -> str:
@@ -739,7 +739,7 @@ def _with_platform_notification_prefix(message: str) -> str:
 
 
 def publish_notification(*, detailed_text, compact_text):
-    build_composer().build_notification_adapters().publish_cycle_notification(
+    return build_composer().build_notification_adapters().publish_cycle_notification(
         detailed_text=detailed_text,
         compact_text=compact_text,
     )
@@ -796,20 +796,22 @@ def _notify_runtime_error(exc: Exception, *, route_label: str | None = None) -> 
         print("IBKR runtime error notification skipped: no Telegram target configured.", flush=True)
         return False
     message = _runtime_error_notification_message(exc, route_label=route_label)
+    outcomes = []
     for token, chat_id in targets:
-        send_telegram_message(
+        outcomes.append(send_telegram_message(
             _with_platform_notification_prefix(message),
             token=token,
             chat_id=chat_id,
             requests_module=requests,
-        )
-    return True
+        ))
+    return bool(outcomes) and all(outcomes)
 
 
 def _publish_runtime_failure_notification(*, detailed_text: str, compact_text: str, exc: Exception) -> bool:
     try:
-        publish_notification(detailed_text=detailed_text, compact_text=compact_text)
-        return True
+        if publish_notification(detailed_text=detailed_text, compact_text=compact_text):
+            return True
+        return _notify_runtime_error(exc)
     except Exception as notification_exc:
         print(f"IBKR runtime error notification fallback: {notification_exc}", flush=True)
         return _notify_runtime_error(exc)
@@ -1022,6 +1024,32 @@ def _build_notification_delivery_log_for_report(
         "notification_contains_order_preview_summary": True,
         "notification_redacts_sensitive_fields": True,
         "redaction_policy": "raw notification text is not persisted; only sha256 and length are recorded",
+    }
+
+
+def _build_notification_delivery_summary(delivery_events: list[dict]) -> dict:
+    safe_fields = (
+        "sink",
+        "delivery_status",
+        "transport_acknowledged",
+        "error_type",
+        "compact_text_sha256",
+        "compact_text_length",
+    )
+    events = [
+        {key: event[key] for key in safe_fields if key in event}
+        for event in (dict(item) for item in delivery_events)
+    ]
+    if not events:
+        return {}
+    sent_count = sum(event.get("delivery_status") == "sent" for event in events)
+    failed_count = sum(event.get("delivery_status") == "failed" for event in events)
+    return {
+        "attempted_count": len(events),
+        "sent_count": sent_count,
+        "failed_count": failed_count,
+        "all_acknowledged": failed_count == 0 and sent_count == len(events),
+        "delivery_events": events,
     }
 
 
@@ -1329,6 +1357,11 @@ def _handle_request(
         )
         if notification_delivery_log:
             report_summary["notification_delivery_log"] = notification_delivery_log
+        notification_delivery_summary = _build_notification_delivery_summary(
+            notification_delivery_events
+        )
+        if notification_delivery_summary:
+            report_summary["notification_delivery_summary"] = notification_delivery_summary
         execution_status = str(report_summary.get("execution_status") or "").strip().lower()
         execution_failed = _is_execution_failure(
             execution_status,

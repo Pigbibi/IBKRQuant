@@ -492,6 +492,63 @@ def test_runtime_target_scheduler_does_not_skip_when_lookback_includes_scheduler
     assert reason is None
 
 
+def test_main_rejects_previous_session_report_after_a_new_session_is_due(
+    monkeypatch,
+    capsys,
+):
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("RUNTIME_HEARTBEAT_NAME", "IBKR US runtime")
+    monkeypatch.setenv("RUNTIME_HEARTBEAT_REQUIRED_SERVICES", "svc-us")
+    monkeypatch.setenv("RUNTIME_HEARTBEAT_GCS_URIS", "gs://bucket/reports")
+    monkeypatch.setenv(
+        "RUNTIME_TARGET_JSON",
+        json.dumps(
+            {
+                "service_name": "svc-us",
+                "strategy_profile": "us-strategy",
+                "account_scope": "US",
+                "scheduler": {
+                    "timezone": "America/New_York",
+                    "main_time": "45 15 * * *",
+                },
+                "market": "US",
+                "market_calendar": "NYSE",
+                "market_timezone": "America/New_York",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "_list_gcs_objects",
+        lambda *_args, **_kwargs: [
+            {
+                "url": "gs://bucket/reports/previous.json",
+                "metadata": {"updated": "2026-07-28T19:46:00Z"},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "_cat_gcs_json",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "service_name": "svc-us",
+            "strategy_profile": "us-strategy",
+            "account_scope": "US",
+        },
+    )
+    monkeypatch.setattr(heartbeat, "_send_telegram", lambda _message: True)
+
+    result = heartbeat.main(
+        now=dt.datetime(2026, 7, 29, 22, 20, tzinfo=dt.timezone.utc)
+    )
+
+    assert result == 1
+    output = capsys.readouterr().out
+    assert "missing acceptable report for runtime target(s)" in output
+    assert "predates latest due schedule" in output
+
+
 def test_report_with_blocked_execution_status_is_rejected_even_when_top_level_is_ok():
     accepted, reason = heartbeat._is_accepted_report(
         {
@@ -528,6 +585,25 @@ def test_report_with_expected_execution_guard_is_accepted_when_top_level_is_ok(n
 
     assert accepted is True
     assert reason == "status=ok"
+
+
+def test_report_with_failed_notification_delivery_is_rejected():
+    accepted, reason = heartbeat._is_accepted_report(
+        {
+            "status": "ok",
+            "summary": {
+                "notification_delivery_summary": {
+                    "event_count": 1,
+                    "sent_count": 0,
+                    "failed_count": 1,
+                    "all_acknowledged": False,
+                }
+            },
+        }
+    )
+
+    assert accepted is False
+    assert "notification delivery not acknowledged" in reason
 
 
 def test_telegram_token_falls_back_to_secret_manager(monkeypatch):

@@ -938,6 +938,28 @@ def test_notification_delivery_log_summary_stays_empty_without_sent_event(strate
     assert payload == {}
 
 
+def test_notification_delivery_summary_keeps_failed_transport_receipt(strategy_module):
+    payload = strategy_module._build_notification_delivery_summary(
+        [
+            {
+                "sink": "telegram",
+                "delivery_status": "failed",
+                "transport_acknowledged": False,
+                "error_type": "RuntimeError",
+                "compact_text_sha256": "a" * 64,
+                "compact_text_length": 42,
+            }
+        ]
+    )
+
+    assert payload["attempted_count"] == 1
+    assert payload["sent_count"] == 0
+    assert payload["failed_count"] == 1
+    assert payload["all_acknowledged"] is False
+    assert payload["delivery_events"][0]["error_type"] == "RuntimeError"
+    assert "compact_text" not in payload["delivery_events"][0]
+
+
 def test_handle_request_post_returns_market_closed_when_schedule_empty(strategy_module, monkeypatch):
     observed = {}
 
@@ -1144,12 +1166,13 @@ def test_send_tg_message_uses_cycle_channel_sender(strategy_module, monkeypatch)
         "quant_platform_kit.notifications.cycle_channel.build_cycle_sender",
         lambda **kwargs: (
             observed.setdefault("sender_config", kwargs),
-            lambda message: observed.setdefault("message", message),
+            lambda message: (observed.setdefault("message", message), False)[1],
         )[1],
     )
 
-    strategy_module.send_tg_message("hello")
+    sent = strategy_module.send_tg_message("hello")
 
+    assert sent is False
     assert observed == {
         "sender_config": {
             "channel": "telegram",

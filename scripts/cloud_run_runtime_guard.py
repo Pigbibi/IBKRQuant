@@ -23,6 +23,7 @@ FAILURE_WORDS = (
     "URL_ERROR",
     "URL_UNREACHABLE",
 )
+SCHEDULER_CLOUD_RUN_DEDUP_SECONDS = 120
 
 
 def _split_values(raw: str | None) -> list[str]:
@@ -133,6 +134,41 @@ def _scheduler_entry_since(
         if any(alias and alias in job_name for alias in _service_job_aliases(service))
     ]
     return max(matches) if matches else fallback
+
+
+def _is_duplicate_scheduler_failure(
+    entry: dict[str, Any],
+    cloud_run_failures_by_service: dict[str, list[dict[str, Any]]],
+) -> bool:
+    scheduler_timestamp = _parse_timestamp(entry.get("timestamp"))
+    job_name = _entry_job_name(entry)
+    if scheduler_timestamp is None or not job_name:
+        return False
+
+    tolerance = dt.timedelta(seconds=SCHEDULER_CLOUD_RUN_DEDUP_SECONDS)
+    for service, failures in cloud_run_failures_by_service.items():
+        if not any(alias and alias in job_name for alias in _service_job_aliases(service)):
+            continue
+        for failure in failures:
+            cloud_run_timestamp = _parse_timestamp(failure.get("timestamp"))
+            if (
+                cloud_run_timestamp is not None
+                and abs(scheduler_timestamp - cloud_run_timestamp) <= tolerance
+            ):
+                return True
+    return False
+
+
+def _services_without_success(
+    services: list[str],
+    success_count_by_service: dict[str, int],
+    queried_services: set[str],
+) -> list[str]:
+    return [
+        service
+        for service in services
+        if service in queried_services and success_count_by_service.get(service, 0) == 0
+    ]
 
 
 def _run_gcloud(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -505,6 +541,9 @@ def main() -> int:
     issues: list[str] = []
     details: list[str] = []
     success_count = 0
+    success_count_by_service: dict[str, int] = {}
+    queried_services: set[str] = set()
+    cloud_run_failures_by_service: dict[str, list[dict[str, Any]]] = {}
     service_since_by_name: dict[str, dt.datetime] = {}
 
     try:
@@ -527,16 +566,26 @@ def main() -> int:
         except RuntimeError as exc:
             issues.append(f"Cloud Run log query failed for {service}: {exc}")
             continue
+        queried_services.add(service)
         failures = [entry for entry in entries if _is_failure(entry)]
-        success_count += sum(1 for entry in entries if _is_success(entry))
+        cloud_run_failures_by_service[service] = failures
+        service_success_count = sum(1 for entry in entries if _is_success(entry))
+        success_count_by_service[service] = service_success_count
+        success_count += service_success_count
         if failures:
             issues.append(f"{len(failures)} Cloud Run failure log(s) for {service}")
             details.extend(_summarize(entry) for entry in failures[:5])
 
-    if services and require_success and success_count == 0:
-        issues.append(
-            f"no successful Cloud Run request found for {', '.join(services)} in the last {lookback_minutes} minutes"
-        )
+    if services and require_success:
+        for service in _services_without_success(
+            services,
+            success_count_by_service,
+            queried_services,
+        ):
+            issues.append(
+                f"no successful Cloud Run request found for {service} "
+                f"in the last {lookback_minutes} minutes"
+            )
 
     if check_scheduler and scheduler_pattern:
         log_filter = f'resource.type="cloud_scheduler_job" AND timestamp >= "{since_text}"'
@@ -556,6 +605,11 @@ def main() -> int:
                 entry_timestamp = _parse_timestamp(entry.get("timestamp"))
                 entry_since = _scheduler_entry_since(entry, service_since_by_name, since)
                 if entry_timestamp and entry_timestamp < entry_since:
+                    continue
+                if _is_duplicate_scheduler_failure(
+                    entry,
+                    cloud_run_failures_by_service,
+                ):
                     continue
                 failures.append(entry)
             if failures:
