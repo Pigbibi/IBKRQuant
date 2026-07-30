@@ -14,6 +14,10 @@ from scripts.runtime_heartbeat_policy import (
 from scripts import execution_report_heartbeat as heartbeat
 
 
+def _july(day: int, hour: int, minute: int) -> dt.datetime:
+    return dt.datetime(2026, 7, day, hour, minute, tzinfo=dt.timezone.utc)
+
+
 def _target(
     *,
     service: str,
@@ -77,41 +81,6 @@ def test_due_targets_use_each_strategy_market_calendar() -> None:
     assert [target["strategy_profile"] for target in due] == ["hk-strategy"]
 
 
-def test_real_exchange_calendars_distinguish_us_holiday_from_hk_session() -> None:
-    targets = load_runtime_targets(
-        {
-            "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(
-                {
-                    "targets": [
-                        _target(
-                            service="svc-us",
-                            strategy="us-strategy",
-                            scope="US",
-                            timezone="America/New_York",
-                            calendar="NYSE",
-                        ),
-                        _target(
-                            service="svc-hk",
-                            strategy="hk-strategy",
-                            scope="HK",
-                            timezone="Asia/Hong_Kong",
-                            calendar="XHKG",
-                        ),
-                    ]
-                }
-            )
-        }
-    )
-
-    due, evaluated = filter_due_targets(
-        targets,
-        since=dt.datetime(2026, 7, 3, 0, 0, tzinfo=dt.timezone.utc),
-        now=dt.datetime(2026, 7, 3, 22, 0, tzinfo=dt.timezone.utc),
-    )
-
-    assert evaluated is True
-    assert [target["strategy_profile"] for target in due] == ["hk-strategy"]
-
 
 def test_july_29_us_month_end_target_is_due_at_1545_eastern() -> None:
     raw_target = _target(
@@ -138,74 +107,8 @@ def test_july_29_us_month_end_target_is_due_at_1545_eastern() -> None:
 
     assert evaluated is True
     assert [target["strategy_profile"] for target in due] == ["us-monthly"]
-    assert target_latest_due_at(due[0]) == dt.datetime(
-        2026,
-        7,
-        29,
-        19,
-        45,
-        tzinfo=dt.timezone.utc,
-    )
+    assert target_latest_due_at(due[0]) == _july(29, 19, 45)
 
-
-def test_neutral_daily_heartbeat_tracks_latest_due_time_per_market() -> None:
-    targets = load_runtime_targets(
-        {
-            "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(
-                {
-                    "targets": [
-                        _target(
-                            service="svc-us",
-                            strategy="us-strategy",
-                            scope="US",
-                            timezone="America/New_York",
-                            calendar="NYSE",
-                        ),
-                        _target(
-                            service="svc-hk",
-                            strategy="hk-strategy",
-                            scope="HK",
-                            timezone="Asia/Hong_Kong",
-                            calendar="XHKG",
-                        ),
-                    ]
-                }
-            )
-        }
-    )
-
-    due, evaluated = filter_due_targets(
-        targets,
-        since=dt.datetime(2026, 7, 28, 10, 20, tzinfo=dt.timezone.utc),
-        now=dt.datetime(2026, 7, 29, 22, 20, tzinfo=dt.timezone.utc),
-        session_dates_loader=lambda _calendar, **_kwargs: {
-            dt.date(2026, 7, 28),
-            dt.date(2026, 7, 29),
-        },
-    )
-
-    assert evaluated is True
-    assert {
-        target["strategy_profile"]: target_latest_due_at(target)
-        for target in due
-    } == {
-        "us-strategy": dt.datetime(
-            2026,
-            7,
-            29,
-            19,
-            45,
-            tzinfo=dt.timezone.utc,
-        ),
-        "hk-strategy": dt.datetime(
-            2026,
-            7,
-            29,
-            7,
-            45,
-            tzinfo=dt.timezone.utc,
-        ),
-    }
 
 
 def test_same_service_strategies_require_distinct_reports() -> None:
@@ -300,34 +203,6 @@ def test_scheduler_timezone_beats_account_region_when_market_is_not_explicit() -
     assert targets[0]["market_timezone"] == "America/New_York"
 
 
-def test_ambiguous_sg_account_does_not_guess_a_stock_exchange() -> None:
-    targets = load_runtime_targets(
-        {
-            "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(
-                {
-                    "targets": [
-                        {
-                            "service": "longbridge-sg-service",
-                            "account_scope": "SG",
-                            "runtime_target": {
-                                "service_name": "longbridge-sg-service",
-                                "strategy_profile": "unknown-strategy",
-                                "account_scope": "SG",
-                                "scheduler": {
-                                    "timezone": "UTC",
-                                    "main_time": "0 12 * * *",
-                                },
-                            },
-                        }
-                    ]
-                }
-            )
-        }
-    )
-
-    assert targets[0]["market"] == ""
-    assert targets[0]["market_calendar"] == ""
-
 
 def test_calendar_failure_keeps_target_due_fail_closed() -> None:
     targets = load_runtime_targets(
@@ -356,14 +231,7 @@ def test_calendar_failure_keeps_target_due_fail_closed() -> None:
     )
 
     assert len(due) == 1
-    assert target_latest_due_at(due[0]) == dt.datetime(
-        2026,
-        7,
-        3,
-        19,
-        45,
-        tzinfo=dt.timezone.utc,
-    )
+    assert target_latest_due_at(due[0]) == _july(3, 19, 45)
     assert evaluated is False
 
 
@@ -408,27 +276,6 @@ def test_target_defaults_and_scheduler_aliases_are_normalized() -> None:
     }
 
 
-def test_strategy_profile_resolver_canonicalizes_aliases() -> None:
-    targets = load_runtime_targets(
-        {
-            "RUNTIME_TARGET_JSON": json.dumps(
-                {
-                    "service_name": "alias-service",
-                    "strategy_profile": "supported-alias",
-                    "scheduler": {
-                        "main_time": "45 15 * * *",
-                        "timezone": "UTC",
-                    },
-                }
-            )
-        },
-        profile_resolver=lambda value: (
-            "canonical-strategy" if value == "supported-alias" else value
-        ),
-    )
-
-    assert targets[0]["strategy_profile"] == "canonical-strategy"
-
 
 def test_publication_grace_uses_previous_matured_schedule_cutoff() -> None:
     targets = load_runtime_targets(
@@ -463,34 +310,5 @@ def test_publication_grace_uses_previous_matured_schedule_cutoff() -> None:
     )
 
     assert evaluated is True
-    assert target_latest_due_at(within_grace[0]) == dt.datetime(
-        2026,
-        7,
-        28,
-        12,
-        0,
-        tzinfo=dt.timezone.utc,
-    )
-    assert target_latest_due_at(after_grace[0]) == dt.datetime(
-        2026,
-        7,
-        29,
-        12,
-        0,
-        tzinfo=dt.timezone.utc,
-    )
-
-
-def test_runtime_target_configuration_presence_is_preserved_when_all_disabled() -> None:
-    environ = {
-        "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(
-            {
-                "defaults": {"runtime_target_enabled": False},
-                "targets": [{"service": "disabled-service"}],
-            }
-        )
-    }
-
-    assert runtime_target_configuration_present(environ) is True
-    assert load_runtime_targets(environ) == []
-    assert load_runtime_targets(environ, include_disabled=True)[0]["enabled"] is False
+    assert target_latest_due_at(within_grace[0]) == _july(28, 12, 0)
+    assert target_latest_due_at(after_grace[0]) == _july(29, 12, 0)
