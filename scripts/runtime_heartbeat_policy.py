@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 SessionDatesLoader = Callable[..., set[dt.date]]
 WarningLogger = Callable[[str], None]
+ProfileResolver = Callable[[str], str]
 
 _LATEST_DUE_AT_KEY = "_heartbeat_latest_due_at"
 _MARKET_DEFAULTS = {
@@ -48,15 +49,39 @@ def _enabled(value: Any, *, default: bool = True) -> bool:
     return str(value).strip().lower() not in {"0", "false", "no", "n", "off"}
 
 
-def _runtime_target(item: Mapping[str, Any]) -> dict[str, Any]:
-    value = item.get("runtime_target") or item.get("runtime_target_json")
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _target_field(
+    item: Mapping[str, Any],
+    defaults: Mapping[str, Any],
+    *names: str,
+) -> Any:
+    for source in (
+        item,
+        _mapping(item.get("env")),
+        defaults,
+        _mapping(defaults.get("env")),
+    ):
+        for name in names:
+            if name in source:
+                return source[name]
+    return None
+
+
+def _runtime_target(
+    item: Mapping[str, Any],
+    defaults: Mapping[str, Any],
+) -> dict[str, Any]:
+    value = _target_field(item, defaults, "runtime_target", "runtime_target_json")
     if isinstance(value, str):
         try:
             value = json.loads(value)
-        except json.JSONDecodeError:
-            value = {}
-    if isinstance(value, dict):
-        return value
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"runtime target JSON is invalid: {exc}") from exc
+    if isinstance(value, Mapping):
+        return dict(value)
     return dict(item)
 
 
@@ -80,14 +105,23 @@ def _suffix_value(sources: list[Mapping[str, Any]], suffix: str) -> str:
 def _service_values(
     item: Mapping[str, Any],
     runtime_target: Mapping[str, Any],
+    defaults: Mapping[str, Any],
     environ: Mapping[str, str],
 ) -> list[str]:
-    value = _first_value(
-        [item, runtime_target],
-        ("service", "service_name", "cloud_run_service"),
+    value = _target_field(
+        item,
+        defaults,
+        "service",
+        "service_name",
+        "cloud_run_service",
     )
+    if value is None:
+        value = _first_value(
+            [runtime_target],
+            ("service", "service_name", "cloud_run_service"),
+        )
     if value:
-        return _split_values(value)
+        return _split_values(str(value))
     services = _split_values(environ.get("CLOUD_RUN_SERVICES"))
     services.extend(_split_values(environ.get("CLOUD_RUN_SERVICE")))
     return list(dict.fromkeys(services))
@@ -96,12 +130,20 @@ def _service_values(
 def _normalize_target(
     item: Mapping[str, Any],
     runtime_target: Mapping[str, Any],
+    defaults: Mapping[str, Any],
     service: str,
     environ: Mapping[str, str],
     *,
     use_global_market_fallback: bool,
+    profile_resolver: ProfileResolver | None,
 ) -> dict[str, Any]:
-    sources = [runtime_target, item]
+    sources = [
+        runtime_target,
+        item,
+        _mapping(item.get("env")),
+        defaults,
+        _mapping(defaults.get("env")),
+    ]
     scheduler = next(
         (
             value
@@ -110,6 +152,18 @@ def _normalize_target(
         ),
         {},
     )
+    scheduler = dict(scheduler)
+    if not str(scheduler.get("main_time") or "").strip():
+        main_time = _target_field(
+            item,
+            defaults,
+            "CLOUD_SCHEDULER_MAIN_TIME",
+            "cloud_scheduler_main_time",
+        )
+        if main_time is None:
+            main_time = environ.get("CLOUD_SCHEDULER_MAIN_TIME")
+        if main_time is not None and str(main_time).strip():
+            scheduler["main_time"] = str(main_time).strip()
     account_scope = _first_value(
         sources,
         (
@@ -165,55 +219,86 @@ def _normalize_target(
         or default_timezone
         or str(scheduler.get("timezone") or "").strip()
     )
+    if scheduler and not str(scheduler.get("timezone") or "").strip() and market_timezone:
+        scheduler["timezone"] = market_timezone
+    strategy_profile = _first_value(
+        sources,
+        ("strategy_profile", "strategy", "profile"),
+    )
+    if strategy_profile and profile_resolver is not None:
+        strategy_profile = profile_resolver(strategy_profile)
     return {
         "service": str(service).strip(),
-        "strategy_profile": _first_value(
-            sources,
-            ("strategy_profile", "strategy", "profile"),
-        ),
+        "strategy_profile": strategy_profile,
         "account_scope": account_scope,
-        "scheduler": dict(scheduler),
+        "scheduler": scheduler,
         "market": market,
         "market_calendar": market_calendar,
         "market_timezone": market_timezone,
     }
 
 
-def load_runtime_targets(environ: Mapping[str, str]) -> list[dict[str, Any]]:
+def _load_runtime_target_items(
+    environ: Mapping[str, str],
+) -> tuple[list[Mapping[str, Any]], Mapping[str, Any]]:
     raw_targets = str(environ.get("CLOUD_RUN_SERVICE_TARGETS_JSON") or "").strip()
     items: list[Mapping[str, Any]] = []
+    defaults: Mapping[str, Any] = {}
     if raw_targets:
         try:
             payload = json.loads(raw_targets)
-        except json.JSONDecodeError:
-            payload = {}
-        targets = payload.get("targets") if isinstance(payload, dict) else payload
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"CLOUD_RUN_SERVICE_TARGETS_JSON is invalid: {exc}") from exc
+        if isinstance(payload, Mapping):
+            targets = payload.get("targets")
+            defaults = _mapping(payload.get("defaults"))
+        else:
+            targets = payload
         if isinstance(targets, list):
-            items = [target for target in targets if isinstance(target, dict)]
+            items = [target for target in targets if isinstance(target, Mapping)]
+        else:
+            raise ValueError(
+                "CLOUD_RUN_SERVICE_TARGETS_JSON must be an array or object with targets"
+            )
 
     if not items:
         raw_runtime_target = str(environ.get("RUNTIME_TARGET_JSON") or "").strip()
         if raw_runtime_target:
             try:
                 runtime_target = json.loads(raw_runtime_target)
-            except json.JSONDecodeError:
-                runtime_target = {}
-            if isinstance(runtime_target, dict):
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"RUNTIME_TARGET_JSON is invalid: {exc}") from exc
+            if isinstance(runtime_target, Mapping):
                 items = [runtime_target]
+            else:
+                raise ValueError("RUNTIME_TARGET_JSON must decode to an object")
+    return items, defaults
 
+
+def runtime_target_configuration_present(environ: Mapping[str, str]) -> bool:
+    return bool(
+        str(environ.get("CLOUD_RUN_SERVICE_TARGETS_JSON") or "").strip()
+        or str(environ.get("RUNTIME_TARGET_JSON") or "").strip()
+    )
+
+
+def runtime_target_configuration_has_enabled_targets(
+    environ: Mapping[str, str],
+) -> bool:
+    items, defaults = _load_runtime_target_items(environ)
+    if not items:
+        return False
     expected_scope = str(environ.get("RUNTIME_HEARTBEAT_ACCOUNT_SCOPE") or "").strip().lower()
-    eligible: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
     for item in items:
-        runtime_target = _runtime_target(item)
-        enabled_value = item.get("runtime_target_enabled")
-        if enabled_value is None:
-            enabled_value = item.get("RUNTIME_TARGET_ENABLED")
-        if enabled_value is None:
-            enabled_value = runtime_target.get("runtime_target_enabled")
-        if not _enabled(enabled_value):
-            continue
+        runtime_target = _runtime_target(item, defaults)
         target_scope = _first_value(
-            [item, runtime_target],
+            [
+                runtime_target,
+                item,
+                _mapping(item.get("env")),
+                defaults,
+                _mapping(defaults.get("env")),
+            ],
             (
                 "account_scope",
                 "account_group",
@@ -224,18 +309,77 @@ def load_runtime_targets(environ: Mapping[str, str]) -> list[dict[str, Any]]:
         )
         if expected_scope and target_scope and target_scope.lower() != expected_scope:
             continue
-        eligible.append((item, runtime_target))
+        enabled_value = _target_field(
+            item,
+            defaults,
+            "runtime_target_enabled",
+            "RUNTIME_TARGET_ENABLED",
+        )
+        if enabled_value is None:
+            enabled_value = runtime_target.get("runtime_target_enabled")
+        if _enabled(enabled_value):
+            return True
+    return False
+
+
+def load_runtime_targets(
+    environ: Mapping[str, str],
+    *,
+    include_disabled: bool = False,
+    profile_resolver: ProfileResolver | None = None,
+) -> list[dict[str, Any]]:
+    items, defaults = _load_runtime_target_items(environ)
+
+    expected_scope = str(environ.get("RUNTIME_HEARTBEAT_ACCOUNT_SCOPE") or "").strip().lower()
+    eligible: list[tuple[Mapping[str, Any], dict[str, Any], bool]] = []
+    for item in items:
+        runtime_target = _runtime_target(item, defaults)
+        enabled_value = _target_field(
+            item,
+            defaults,
+            "runtime_target_enabled",
+            "RUNTIME_TARGET_ENABLED",
+        )
+        if enabled_value is None:
+            enabled_value = runtime_target.get("runtime_target_enabled")
+        enabled = _enabled(enabled_value)
+        if not enabled and not include_disabled:
+            continue
+        target_scope = _first_value(
+            [
+                runtime_target,
+                item,
+                _mapping(item.get("env")),
+                defaults,
+                _mapping(defaults.get("env")),
+            ],
+            (
+                "account_scope",
+                "account_group",
+                "account_region",
+                "ACCOUNT_GROUP",
+                "ACCOUNT_REGION",
+            ),
+        )
+        if expected_scope and target_scope and target_scope.lower() != expected_scope:
+            continue
+        eligible.append((item, runtime_target, enabled))
 
     normalized: list[dict[str, Any]] = []
-    for item, runtime_target in eligible:
-        for service in _service_values(item, runtime_target, environ):
+    enabled_count = sum(1 for _item, _runtime_target_value, enabled in eligible if enabled)
+    for item, runtime_target, enabled in eligible:
+        for service in _service_values(item, runtime_target, defaults, environ):
             target = _normalize_target(
                 item,
                 runtime_target,
+                defaults,
                 service,
                 environ,
-                use_global_market_fallback=len(eligible) == 1,
+                use_global_market_fallback=enabled_count == 1,
+                profile_resolver=profile_resolver,
             )
+            if include_disabled:
+                target["enabled"] = enabled
             key = target_key(target)
             if key and all(target_key(existing) != key for existing in normalized):
                 normalized.append(target)
@@ -401,15 +545,14 @@ def _target_due_status(
     market_aware: bool,
     session_dates_loader: SessionDatesLoader,
     warning_logger: WarningLogger,
+    publication_grace: dt.timedelta,
 ) -> tuple[bool | None, dt.datetime | None]:
     scheduler = target.get("scheduler")
     if not isinstance(scheduler, Mapping):
         return None, None
     schedule = str(scheduler.get("main_time") or "").strip()
     fields = schedule.split()
-    if len(fields) == 2:
-        schedule = f"{schedule} * * *"
-    elif len(fields) != 5:
+    if len(fields) != 5:
         return None, None
     timezone_name = str(scheduler.get("timezone") or "UTC").strip() or "UTC"
     try:
@@ -423,12 +566,32 @@ def _target_due_status(
 
     since_utc = since.astimezone(dt.timezone.utc)
     now_utc = now.astimezone(dt.timezone.utc)
+    cursor = since_utc.replace(second=0, microsecond=0)
+    if cursor < since_utc:
+        cursor += dt.timedelta(minutes=1)
+    matured_at = now_utc - max(publication_grace, dt.timedelta())
+    cron_due_at: list[dt.datetime] = []
+    while cursor <= now_utc:
+        local_time = cursor.astimezone(scheduler_timezone)
+        try:
+            matches = cron_matches(schedule, local_time)
+        except (TypeError, ValueError) as exc:
+            warning_logger(
+                f"Unable to evaluate heartbeat cron for {target_label(target)}: "
+                f"{type(exc).__name__}; keeping target required"
+            )
+            return None, None
+        if matches and cursor <= matured_at:
+            cron_due_at.append(cursor)
+        cursor += dt.timedelta(minutes=1)
+    latest_cron_due_at = cron_due_at[-1] if cron_due_at else None
+
     session_dates: set[dt.date] | None = None
     market_calendar = str(target.get("market_calendar") or "").strip()
+    market_timezone_name = (
+        str(target.get("market_timezone") or "").strip() or timezone_name
+    )
     if market_aware and market_calendar:
-        market_timezone_name = (
-            str(target.get("market_timezone") or "").strip() or timezone_name
-        )
         try:
             market_timezone = ZoneInfo(market_timezone_name)
             session_dates = session_dates_loader(
@@ -441,32 +604,19 @@ def _target_due_status(
                 f"Unable to evaluate heartbeat market calendar {market_calendar}: "
                 f"{type(exc).__name__}; keeping target required"
             )
-            return None, None
+            return None, latest_cron_due_at
 
-    cursor = since_utc.replace(second=0, microsecond=0)
-    if cursor < since_utc:
-        cursor += dt.timedelta(minutes=1)
-    latest_due_at: dt.datetime | None = None
-    while cursor <= now_utc:
-        local_time = cursor.astimezone(scheduler_timezone)
-        try:
-            matches = cron_matches(schedule, local_time)
-        except (TypeError, ValueError) as exc:
-            warning_logger(
-                f"Unable to evaluate heartbeat cron for {target_label(target)}: "
-                f"{type(exc).__name__}; keeping target required"
-            )
-            return None, None
-        if matches:
-            if session_dates is None:
-                latest_due_at = cursor
-            else:
-                market_timezone = ZoneInfo(
-                    str(target.get("market_timezone") or "").strip() or timezone_name
-                )
-                if cursor.astimezone(market_timezone).date() in session_dates:
-                    latest_due_at = cursor
-        cursor += dt.timedelta(minutes=1)
+    latest_due_at = latest_cron_due_at
+    if session_dates is not None:
+        market_timezone = ZoneInfo(market_timezone_name)
+        latest_due_at = next(
+            (
+                due_at
+                for due_at in reversed(cron_due_at)
+                if due_at.astimezone(market_timezone).date() in session_dates
+            ),
+            None,
+        )
     return latest_due_at is not None, latest_due_at
 
 
@@ -476,6 +626,7 @@ def filter_due_targets(
     since: dt.datetime,
     now: dt.datetime,
     market_aware: bool = True,
+    publication_grace: dt.timedelta = dt.timedelta(minutes=30),
     session_dates_loader: SessionDatesLoader = _market_session_dates,
     warning_logger: WarningLogger = lambda message: print(message, file=sys.stderr),
 ) -> tuple[list[dict[str, Any]], bool]:
@@ -489,6 +640,7 @@ def filter_due_targets(
             market_aware=market_aware,
             session_dates_loader=session_dates_loader,
             warning_logger=warning_logger,
+            publication_grace=publication_grace,
         )
         if status is not None:
             evaluated = True

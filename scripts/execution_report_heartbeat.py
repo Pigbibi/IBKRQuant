@@ -20,6 +20,8 @@ try:
         filter_services_for_targets,
         load_runtime_targets,
         match_payload_target,
+        runtime_target_configuration_has_enabled_targets,
+        runtime_target_configuration_present,
         target_key,
         target_label,
         target_latest_due_at,
@@ -30,6 +32,8 @@ except ModuleNotFoundError:
         filter_services_for_targets,
         load_runtime_targets,
         match_payload_target,
+        runtime_target_configuration_has_enabled_targets,
+        runtime_target_configuration_present,
         target_key,
         target_label,
         target_latest_due_at,
@@ -334,30 +338,17 @@ def _base_report_uris() -> list[str]:
 
 
 def _load_target_service_candidates() -> tuple[list[str], list[str]]:
-    disabled_target_services: list[str] = []
-    enabled_target_services: list[str] = []
-    raw_targets = (os.environ.get("CLOUD_RUN_SERVICE_TARGETS_JSON") or "").strip()
-    if not raw_targets:
-        return enabled_target_services, disabled_target_services
-    try:
-        payload = json.loads(raw_targets)
-        targets = payload.get("targets") if isinstance(payload, dict) else payload
-        if isinstance(targets, list):
-            for target in targets:
-                if not isinstance(target, dict):
-                    continue
-                runtime_target = _target_runtime_target(target)
-                if not _target_matches_expected_scope(target, runtime_target):
-                    continue
-                target_services = _target_service_values(target, runtime_target)
-                if not target_services:
-                    continue
-                if _target_enabled(target, runtime_target):
-                    enabled_target_services.extend(target_services)
-                else:
-                    disabled_target_services.extend(target_services)
-    except json.JSONDecodeError:
-        pass
+    targets = load_runtime_targets(os.environ, include_disabled=True)
+    enabled_target_services = [
+        str(target.get("service") or "").strip()
+        for target in targets
+        if target.get("enabled") is True
+    ]
+    disabled_target_services = [
+        str(target.get("service") or "").strip()
+        for target in targets
+        if target.get("enabled") is False
+    ]
     return _unique_values(enabled_target_services), _unique_values(disabled_target_services)
 
 
@@ -547,6 +538,41 @@ def _scheduler_job_name_candidates(service: str) -> list[str]:
     if service_name.endswith("-service"):
         candidates.append(f"{service_name.removesuffix('-service')}-scheduler")
     return _unique_values(candidates)
+
+
+def _hydrate_runtime_target_schedules(
+    targets: list[dict[str, Any]],
+    *,
+    project: str | None,
+) -> list[dict[str, Any]]:
+    hydrated: list[dict[str, Any]] = []
+    for target in targets:
+        scheduler = target.get("scheduler")
+        effective_scheduler = dict(scheduler) if isinstance(scheduler, dict) else {}
+        if len(str(effective_scheduler.get("main_time") or "").split()) == 5:
+            hydrated.append(target)
+            continue
+        if not _env_bool("RUNTIME_HEARTBEAT_SCHEDULER_AWARE", True):
+            raise RuntimeError(
+                "runtime target schedule is incomplete and scheduler lookup is disabled"
+            )
+        service = str(target.get("service") or "").strip()
+        job = None
+        for job_name in _scheduler_job_name_candidates(service):
+            job = _describe_scheduler_job(job_name, project=project)
+            if job is not None:
+                break
+        schedule = str((job or {}).get("schedule") or "").strip()
+        if len(schedule.split()) != 5:
+            raise RuntimeError(
+                f"unable to resolve effective five-field scheduler cron for {service or '<unknown-service>'}"
+            )
+        timezone_name = str((job or {}).get("timeZone") or "").strip()
+        effective_scheduler["main_time"] = schedule
+        if timezone_name:
+            effective_scheduler["timezone"] = timezone_name
+        hydrated.append({**target, "scheduler": effective_scheduler})
+    return hydrated
 
 
 def _scheduler_job_targets_strategy_run(job: dict[str, Any], service: str) -> bool:
@@ -979,6 +1005,15 @@ def main(now: dt.datetime | None = None) -> int:
     if not _runtime_target_enabled():
         print(f"Execution report heartbeat skipped for {name}: runtime target is disabled")
         return 0
+    if (
+        runtime_target_configuration_present(os.environ)
+        and not runtime_target_configuration_has_enabled_targets(os.environ)
+    ):
+        print(
+            f"Execution report heartbeat skipped for {name}: "
+            "no enabled runtime target matches this heartbeat"
+        )
+        return 0
     lookback_hours = float(os.environ.get("RUNTIME_HEARTBEAT_LOOKBACK_HOURS") or "36")
     max_reports = int(os.environ.get("RUNTIME_HEARTBEAT_MAX_REPORTS_TO_READ") or "20")
     fail_workflow = _env_bool("RUNTIME_HEARTBEAT_FAIL_WORKFLOW_ON_ALERT", True)
@@ -989,11 +1024,27 @@ def main(now: dt.datetime | None = None) -> int:
     now = now.astimezone(dt.timezone.utc)
     since = now - dt.timedelta(hours=lookback_hours)
     runtime_targets = load_runtime_targets(os.environ)
+    try:
+        runtime_targets = _hydrate_runtime_target_schedules(
+            runtime_targets,
+            project=project,
+        )
+    except RuntimeError as exc:
+        message = f"[Execution Report Heartbeat] {name}\nScheduler policy error: {exc}"
+        print(message)
+        _send_telegram(message)
+        return 1 if fail_workflow else 0
+    publication_grace_minutes = float(
+        os.environ.get("RUNTIME_HEARTBEAT_PUBLICATION_GRACE_MINUTES") or "30"
+    )
+    if publication_grace_minutes < 0:
+        raise ValueError("RUNTIME_HEARTBEAT_PUBLICATION_GRACE_MINUTES must be non-negative")
     due_targets, target_schedule_evaluated = filter_due_targets(
         runtime_targets,
         since=since,
         now=now,
         market_aware=_env_bool("RUNTIME_HEARTBEAT_MARKET_AWARE", True),
+        publication_grace=dt.timedelta(minutes=publication_grace_minutes),
     )
     if runtime_targets and target_schedule_evaluated and not due_targets:
         target_names = ", ".join(target_label(target) for target in runtime_targets)

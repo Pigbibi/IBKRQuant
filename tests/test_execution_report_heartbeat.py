@@ -107,6 +107,7 @@ def test_explicit_required_services_skip_disabled_targets(monkeypatch):
         "CLOUD_RUN_SERVICE_TARGETS_JSON",
         json.dumps(
             {
+                "defaults": {"RUNTIME_TARGET_ENABLED": "false"},
                 "targets": [
                     {
                         "service": "interactive-brokers-enabled-service",
@@ -114,7 +115,6 @@ def test_explicit_required_services_skip_disabled_targets(monkeypatch):
                     },
                     {
                         "service": "interactive-brokers-disabled-service",
-                        "RUNTIME_TARGET_ENABLED": "false",
                     },
                 ]
             }
@@ -631,3 +631,59 @@ def test_telegram_token_falls_back_to_secret_manager(monkeypatch):
         "--project",
         "interactivebrokersquant",
     ]
+
+
+def test_incomplete_target_schedule_uses_deployed_scheduler_cron(monkeypatch):
+    targets = [
+        {
+            "service": "interactive-brokers-service",
+            "scheduler": {
+                "main_time": "45 15",
+                "timezone": "America/New_York",
+            },
+        }
+    ]
+    monkeypatch.setattr(
+        heartbeat,
+        "_describe_scheduler_job",
+        lambda job_name, **_kwargs: (
+            {
+                "schedule": "45 15 25-29 * *",
+                "timeZone": "America/New_York",
+            }
+            if job_name == "interactive-brokers-service-scheduler"
+            else None
+        ),
+    )
+
+    hydrated = heartbeat._hydrate_runtime_target_schedules(
+        targets,
+        project="test-project",
+    )
+
+    assert hydrated[0]["scheduler"]["main_time"] == "45 15 25-29 * *"
+
+
+def test_main_skips_when_all_configured_targets_are_disabled(monkeypatch, capsys):
+    monkeypatch.delenv("RUNTIME_TARGET_ENABLED", raising=False)
+    monkeypatch.delenv("RUNTIME_TARGET_JSON", raising=False)
+    monkeypatch.setenv("RUNTIME_HEARTBEAT_NAME", "IBKR disabled targets")
+    monkeypatch.setenv(
+        "CLOUD_RUN_SERVICE_TARGETS_JSON",
+        json.dumps(
+            {
+                "defaults": {"runtime_target_enabled": False},
+                "targets": [{"service": "disabled-service"}],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "_list_gcs_objects",
+        lambda *_args, **_kwargs: pytest.fail("GCS should not be queried"),
+    )
+
+    assert heartbeat.main(
+        now=dt.datetime(2026, 6, 20, 23, 10, tzinfo=dt.timezone.utc)
+    ) == 0
+    assert "no enabled runtime target matches this heartbeat" in capsys.readouterr().out

@@ -10,6 +10,9 @@ def test_execution_report_heartbeat_has_market_neutral_daily_schedule() -> None:
     assert 'cron: "20 22 * * *"' in workflow
     assert 'cron: "20 22 * * 1-5"' not in workflow
     assert "RUNTIME_HEARTBEAT_MARKET_AWARE:" in workflow
+    assert "RUNTIME_HEARTBEAT_PUBLICATION_GRACE_MINUTES:" in workflow
+    assert "RUNTIME_HEARTBEAT_SCHEDULER_LOCATION:" in workflow
+    assert "CLOUD_SCHEDULER_MAIN_TIME:" in workflow
     assert "pandas-market-calendars==5.4.0" in workflow
 
 
