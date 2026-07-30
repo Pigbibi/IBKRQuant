@@ -15,7 +15,7 @@ def _load_market_calendar(calendar_name: str, *, logger) -> object | None:
     except Exception as exc:
         logger(
             f"pandas_market_calendars unavailable for {calendar_name}: {exc}; "
-            "falling back to weekday-only market-open check"
+            "failing closed as market closed"
         )
         return None
 
@@ -31,7 +31,7 @@ def is_market_open_now(
     now_ny = datetime.now(tz_ny)
     calendar = _load_market_calendar(calendar_name, logger=logger)
     if calendar is None:
-        return now_ny.weekday() < 5
+        return False
     schedule = calendar.schedule(start_date=now_ny.date(), end_date=now_ny.date())
     if len(getattr(schedule, "index", ())) == 0:
         return False
@@ -54,6 +54,6 @@ def is_market_open_today(
     now_ny = datetime.now(tz_ny)
     calendar = _load_market_calendar(calendar_name, logger=logger)
     if calendar is None:
-        return now_ny.weekday() < 5
+        return False
     schedule = calendar.schedule(start_date=now_ny.date(), end_date=now_ny.date())
     return len(getattr(schedule, "index", ())) > 0

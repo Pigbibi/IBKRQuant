@@ -257,6 +257,21 @@ class PlatformRuntimeSettings:
     execution_backend: str = EXECUTION_BACKEND_GATEWAY
 
 
+def _runtime_target_market_value(runtime_target: RuntimeTarget, field: str) -> str | None:
+    value = getattr(runtime_target, field, None)
+    if value is not None and str(value).strip():
+        return str(value).strip()
+    raw = os.getenv("QSL_RUNTIME_TARGET_JSON") or os.getenv("RUNTIME_TARGET_JSON")
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    value = payload.get(field) if isinstance(payload, dict) else None
+    return str(value).strip() if value is not None and str(value).strip() else None
+
+
 def load_platform_runtime_settings(
     *,
     project_id_resolver: Callable[[], str | None],
@@ -336,7 +351,13 @@ def load_platform_runtime_settings(
         )
         ib_client_id = group_config.ib_client_id or 0
 
-    market = resolve_market(os.getenv("IBKR_MARKET"), account_group=account_group)
+    market = resolve_market(
+        first_non_empty(
+            os.getenv("IBKR_MARKET"),
+            _runtime_target_market_value(runtime_target, "market"),
+        ),
+        account_group=account_group,
+    )
     market_defaults = market_default_settings(market)
     return PlatformRuntimeSettings(
         project_id=project_id,
@@ -386,6 +407,7 @@ def load_platform_runtime_settings(
         market=market,
         market_calendar=first_non_empty(
             os.getenv("IBKR_MARKET_CALENDAR"),
+            _runtime_target_market_value(runtime_target, "market_calendar"),
             market_defaults["market_calendar"],
         ),
         market_currency=first_non_empty(
@@ -404,6 +426,7 @@ def load_platform_runtime_settings(
         ).upper(),
         market_timezone=first_non_empty(
             os.getenv("IBKR_MARKET_TIMEZONE"),
+            _runtime_target_market_value(runtime_target, "market_timezone"),
             market_defaults["market_timezone"],
         ),
         quantity_step=1.0,

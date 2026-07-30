@@ -7,7 +7,7 @@ import pytz
 from entrypoints.cloud_run import is_market_open_now, is_market_open_today
 
 
-def test_is_market_open_today_falls_back_to_weekday_when_calendar_import_fails(monkeypatch):
+def test_is_market_open_today_fails_closed_when_calendar_import_fails(monkeypatch):
     monkeypatch.setattr(
         "entrypoints.cloud_run.import_module",
         lambda _name: (_ for _ in ()).throw(TypeError("broken calendar")),
@@ -25,10 +25,10 @@ def test_is_market_open_today_falls_back_to_weekday_when_calendar_import_fails(m
         ),
     )
 
-    assert is_market_open_today() is True
+    assert is_market_open_today() is False
 
 
-def test_is_market_open_now_falls_back_to_weekday_when_calendar_import_fails(monkeypatch):
+def test_is_market_open_now_fails_closed_when_calendar_import_fails(monkeypatch):
     monkeypatch.setattr(
         "entrypoints.cloud_run.import_module",
         lambda _name: (_ for _ in ()).throw(TypeError("broken calendar")),
@@ -46,7 +46,7 @@ def test_is_market_open_now_falls_back_to_weekday_when_calendar_import_fails(mon
         ),
     )
 
-    assert is_market_open_now() is True
+    assert is_market_open_now() is False
 
 
 def test_is_market_open_now_returns_false_before_regular_session(monkeypatch):

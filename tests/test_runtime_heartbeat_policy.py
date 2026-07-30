@@ -1,0 +1,314 @@
+from __future__ import annotations
+
+import datetime as dt
+import json
+
+from scripts.runtime_heartbeat_policy import (
+    filter_due_targets,
+    load_runtime_targets,
+    match_payload_target,
+    runtime_target_configuration_present,
+    target_key,
+    target_latest_due_at,
+)
+from scripts import execution_report_heartbeat as heartbeat
+
+
+def _july(day: int, hour: int, minute: int) -> dt.datetime:
+    return dt.datetime(2026, 7, day, hour, minute, tzinfo=dt.timezone.utc)
+
+
+def _target(
+    *,
+    service: str,
+    strategy: str,
+    scope: str,
+    timezone: str,
+    calendar: str,
+) -> dict[str, object]:
+    return {
+        "service": service,
+        "runtime_target": {
+            "service_name": service,
+            "strategy_profile": strategy,
+            "account_scope": scope,
+            "scheduler": {
+                "timezone": timezone,
+                "main_time": "45 15 * * *",
+            },
+            "market_calendar": calendar,
+            "market_timezone": timezone,
+        },
+    }
+
+
+def test_due_targets_use_each_strategy_market_calendar() -> None:
+    targets = load_runtime_targets(
+        {
+            "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(
+                {
+                    "targets": [
+                        _target(
+                            service="svc-us",
+                            strategy="us-strategy",
+                            scope="US",
+                            timezone="America/New_York",
+                            calendar="NYSE",
+                        ),
+                        _target(
+                            service="svc-hk",
+                            strategy="hk-strategy",
+                            scope="HK",
+                            timezone="Asia/Hong_Kong",
+                            calendar="XHKG",
+                        ),
+                    ]
+                }
+            )
+        }
+    )
+
+    due, evaluated = filter_due_targets(
+        targets,
+        since=dt.datetime(2026, 7, 3, 0, 0, tzinfo=dt.timezone.utc),
+        now=dt.datetime(2026, 7, 3, 22, 0, tzinfo=dt.timezone.utc),
+        session_dates_loader=lambda calendar, **_kwargs: (
+            {dt.date(2026, 7, 3)} if calendar == "XHKG" else set()
+        ),
+    )
+
+    assert evaluated is True
+    assert [target["strategy_profile"] for target in due] == ["hk-strategy"]
+
+
+
+def test_july_29_us_month_end_target_is_due_at_1545_eastern() -> None:
+    raw_target = _target(
+        service="svc-us-monthly",
+        strategy="us-monthly",
+        scope="US",
+        timezone="America/New_York",
+        calendar="NYSE",
+    )
+    raw_target["runtime_target"]["scheduler"]["main_time"] = "45 15 25-29 * *"
+    targets = load_runtime_targets(
+        {
+            "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(
+                {"targets": [raw_target]}
+            )
+        }
+    )
+
+    due, evaluated = filter_due_targets(
+        targets,
+        since=dt.datetime(2026, 7, 29, 19, 40, tzinfo=dt.timezone.utc),
+        now=dt.datetime(2026, 7, 29, 20, 20, tzinfo=dt.timezone.utc),
+    )
+
+    assert evaluated is True
+    assert [target["strategy_profile"] for target in due] == ["us-monthly"]
+    assert target_latest_due_at(due[0]) == _july(29, 19, 45)
+
+
+
+def test_same_service_strategies_require_distinct_reports() -> None:
+    targets = load_runtime_targets(
+        {
+            "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(
+                {
+                    "targets": [
+                        _target(
+                            service="shared-service",
+                            strategy="strategy-a",
+                            scope="US",
+                            timezone="America/New_York",
+                            calendar="NYSE",
+                        ),
+                        _target(
+                            service="shared-service",
+                            strategy="strategy-b",
+                            scope="US",
+                            timezone="America/New_York",
+                            calendar="NYSE",
+                        ),
+                    ]
+                }
+            )
+        }
+    )
+
+    matched, reason = match_payload_target(
+        {
+            "service_name": "shared-service",
+            "strategy_profile": "strategy-a",
+            "account_scope": "US",
+        },
+        targets,
+    )
+
+    assert matched == target_key(targets[0])
+    assert reason == "matched runtime target"
+    missing_strategy, _ = match_payload_target(
+        {"service_name": "shared-service", "account_scope": "US"},
+        targets,
+    )
+    assert missing_strategy is None
+
+    matched_by_heartbeat, matched_key, _ = heartbeat._payload_matches(
+        {
+            "service_name": "shared-service",
+            "strategy_profile": "strategy-a",
+            "account_scope": "US",
+        },
+        ["shared-service"],
+        required_targets=targets,
+    )
+    assert matched_by_heartbeat is True
+    assert matched_key == target_key(targets[0])
+    missing_by_heartbeat, _, _ = heartbeat._payload_matches(
+        {"service_name": "shared-service", "account_scope": "US"},
+        ["shared-service"],
+        required_targets=targets,
+    )
+    assert missing_by_heartbeat is False
+
+
+def test_scheduler_timezone_beats_account_region_when_market_is_not_explicit() -> None:
+    targets = load_runtime_targets(
+        {
+            "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(
+                {
+                    "targets": [
+                        {
+                            "service": "longbridge-sg-us-service",
+                            "account_scope": "SG",
+                            "runtime_target": {
+                                "service_name": "longbridge-sg-us-service",
+                                "strategy_profile": "us-strategy",
+                                "account_scope": "SG",
+                                "scheduler": {
+                                    "timezone": "America/New_York",
+                                    "main_time": "45 15 * * *",
+                                },
+                            },
+                        }
+                    ]
+                }
+            )
+        }
+    )
+
+    assert targets[0]["market"] == "US"
+    assert targets[0]["market_calendar"] == "NYSE"
+    assert targets[0]["market_timezone"] == "America/New_York"
+
+
+
+def test_calendar_failure_keeps_target_due_fail_closed() -> None:
+    targets = load_runtime_targets(
+        {
+            "RUNTIME_TARGET_JSON": json.dumps(
+                _target(
+                    service="svc-us",
+                    strategy="us-strategy",
+                    scope="US",
+                    timezone="America/New_York",
+                    calendar="INVALID",
+                )["runtime_target"]
+            )
+        }
+    )
+
+    def fail_calendar(_calendar: str, **_kwargs: object) -> set[dt.date]:
+        raise RuntimeError("calendar unavailable")
+
+    due, evaluated = filter_due_targets(
+        targets,
+        since=dt.datetime(2026, 7, 3, 0, 0, tzinfo=dt.timezone.utc),
+        now=dt.datetime(2026, 7, 3, 22, 0, tzinfo=dt.timezone.utc),
+        session_dates_loader=fail_calendar,
+        warning_logger=lambda _message: None,
+    )
+
+    assert len(due) == 1
+    assert target_latest_due_at(due[0]) == _july(3, 19, 45)
+    assert evaluated is False
+
+
+def test_target_defaults_and_scheduler_aliases_are_normalized() -> None:
+    targets = load_runtime_targets(
+        {
+            "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(
+                {
+                    "defaults": {
+                        "env": {
+                            "RUNTIME_TARGET_ENABLED": "false",
+                            "CLOUD_SCHEDULER_MAIN_TIME": "45 15 25-29 * *",
+                        },
+                        "market": "US",
+                    },
+                    "targets": [
+                        {
+                            "service": "disabled-service",
+                            "runtime_target": {
+                                "strategy_profile": "disabled-strategy",
+                            },
+                        },
+                        {
+                            "service": "enabled-service",
+                            "RUNTIME_TARGET_ENABLED": "true",
+                            "runtime_target": {
+                                "strategy_profile": "enabled-strategy",
+                            },
+                        },
+                    ],
+                }
+            )
+        }
+    )
+
+    assert len(targets) == 1
+    assert targets[0]["service"] == "enabled-service"
+    assert targets[0]["market"] == "US"
+    assert targets[0]["scheduler"] == {
+        "main_time": "45 15 25-29 * *",
+        "timezone": "America/New_York",
+    }
+
+
+
+def test_publication_grace_uses_previous_matured_schedule_cutoff() -> None:
+    targets = load_runtime_targets(
+        {
+            "RUNTIME_TARGET_JSON": json.dumps(
+                {
+                    "service_name": "grace-service",
+                    "strategy_profile": "grace-strategy",
+                    "scheduler": {
+                        "main_time": "0 12 * * *",
+                        "timezone": "UTC",
+                    },
+                }
+            )
+        }
+    )
+    since = dt.datetime(2026, 7, 28, 11, 30, tzinfo=dt.timezone.utc)
+
+    within_grace, evaluated = filter_due_targets(
+        targets,
+        since=since,
+        now=dt.datetime(2026, 7, 29, 12, 5, tzinfo=dt.timezone.utc),
+        market_aware=False,
+        publication_grace=dt.timedelta(minutes=30),
+    )
+    after_grace, _ = filter_due_targets(
+        targets,
+        since=since,
+        now=dt.datetime(2026, 7, 29, 12, 31, tzinfo=dt.timezone.utc),
+        market_aware=False,
+        publication_grace=dt.timedelta(minutes=30),
+    )
+
+    assert evaluated is True
+    assert target_latest_due_at(within_grace[0]) == _july(28, 12, 0)
+    assert target_latest_due_at(after_grace[0]) == _july(29, 12, 0)

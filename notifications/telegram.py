@@ -523,7 +523,7 @@ def send_telegram_message(
     printer=print,
 ):
     if not token or not chat_id:
-        return
+        return False
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
@@ -539,5 +539,13 @@ def send_telegram_message(
                 f"{response.status_code}: {_safe_telegram_error_text(response.text, token=token)}",
                 flush=True,
             )
+            return False
+        load_payload = getattr(response, "json", None)
+        payload = load_payload() if callable(load_payload) else None
+        if isinstance(payload, dict) and payload.get("ok") is False:
+            printer("Telegram send failed: negative API acknowledgement", flush=True)
+            return False
     except Exception as exc:
         printer(f"Telegram send failed: {type(exc).__name__}", flush=True)
+        return False
+    return True

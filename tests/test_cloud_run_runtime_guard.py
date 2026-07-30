@@ -157,6 +157,54 @@ def test_scheduler_entry_since_uses_matching_service_revision_window():
     )
 
 
+def test_scheduler_failure_matching_cloud_run_failure_is_duplicate():
+    scheduler_entry = {
+        "timestamp": "2026-07-29T19:45:03Z",
+        "resource": {"labels": {"job_id": "test-scheduler"}},
+    }
+    cloud_run_failures = {
+        "test-service": [
+            {
+                "timestamp": "2026-07-29T19:45:01Z",
+                "resource": {"labels": {"service_name": "test-service"}},
+            }
+        ]
+    }
+
+    assert guard._is_duplicate_scheduler_failure(
+        scheduler_entry,
+        cloud_run_failures,
+    )
+
+
+def test_scheduler_failure_for_other_service_is_not_duplicate():
+    scheduler_entry = {
+        "timestamp": "2026-07-29T19:45:03Z",
+        "resource": {"labels": {"job_id": "other-platform-scheduler"}},
+    }
+    cloud_run_failures = {
+        "test-service": [
+            {
+                "timestamp": "2026-07-29T19:45:01Z",
+                "resource": {"labels": {"service_name": "test-service"}},
+            }
+        ]
+    }
+
+    assert not guard._is_duplicate_scheduler_failure(
+        scheduler_entry,
+        cloud_run_failures,
+    )
+
+
+def test_services_without_success_are_reported_individually():
+    assert guard._services_without_success(
+        ["healthy-service", "silent-service"],
+        {"healthy-service": 1, "silent-service": 0},
+        {"healthy-service", "silent-service"},
+    ) == ["silent-service"]
+
+
 def test_monitor_dispatch_capacity_warning_is_not_failure_by_default(monkeypatch):
     monkeypatch.delenv("RUNTIME_GUARD_IGNORE_MONITOR_DISPATCH_CAPACITY_WARNINGS", raising=False)
     entry = {
@@ -197,3 +245,49 @@ def test_strategy_request_capacity_warning_still_fails(monkeypatch):
     }
 
     assert guard._is_failure(entry) is True
+
+
+def test_scheduler_job_matching_rejects_prefixed_service_names():
+    pattern = guard._scheduler_job_pattern_for_services(["test-service"])
+    entry = {
+        "timestamp": "2026-07-29T19:45:03Z",
+        "resource": {
+            "labels": {"job_id": "test-secondary-service-scheduler"}
+        },
+    }
+    failures = {
+        "test-service": [{"timestamp": "2026-07-29T19:45:01Z"}],
+    }
+    fallback = dt.datetime(2026, 7, 29, 19, 0, tzinfo=dt.timezone.utc)
+    service_since = dt.datetime(2026, 7, 29, 19, 30, tzinfo=dt.timezone.utc)
+
+    assert not re.search(pattern, "test-secondary-service-scheduler")
+    assert guard._scheduler_entry_since(
+        entry,
+        {"test-service": service_since},
+        fallback,
+    ) == fallback
+    assert guard._is_duplicate_scheduler_failure(entry, failures) is False
+
+
+def test_explicit_disabled_service_is_removed_using_target_defaults(monkeypatch):
+    monkeypatch.delenv("RUNTIME_GUARD_CLOUD_RUN_SERVICES", raising=False)
+    monkeypatch.delenv("CLOUD_RUN_SERVICE", raising=False)
+    monkeypatch.setenv("CLOUD_RUN_SERVICES", "enabled-service,disabled-service")
+    monkeypatch.setenv(
+        "CLOUD_RUN_SERVICE_TARGETS_JSON",
+        json.dumps(
+            {
+                "defaults": {"runtime_target_enabled": False},
+                "targets": [
+                    {
+                        "service": "enabled-service",
+                        "runtime_target_enabled": True,
+                    },
+                    {"service": "disabled-service"},
+                ],
+            }
+        ),
+    )
+
+    assert guard._load_services() == ["enabled-service"]

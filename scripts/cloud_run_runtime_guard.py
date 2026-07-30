@@ -23,6 +23,7 @@ FAILURE_WORDS = (
     "URL_ERROR",
     "URL_UNREACHABLE",
 )
+SCHEDULER_CLOUD_RUN_DEDUP_SECONDS = 120
 
 
 def _split_values(raw: str | None) -> list[str]:
@@ -40,6 +41,8 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _load_services() -> list[str]:
     services = []
+    enabled_target_services = []
+    disabled_target_services = []
     for name in (
         "RUNTIME_GUARD_CLOUD_RUN_SERVICES",
         "CLOUD_RUN_SERVICES",
@@ -51,37 +54,27 @@ def _load_services() -> list[str]:
     if raw_targets:
         try:
             payload = json.loads(raw_targets)
+            defaults = payload.get("defaults") if isinstance(payload, dict) else {}
+            defaults = defaults if isinstance(defaults, dict) else {}
             targets = payload.get("targets") if isinstance(payload, dict) else payload
             if isinstance(targets, list):
                 for target in targets:
                     if not isinstance(target, dict):
                         continue
-                    if not _target_enabled(target):
-                        continue
-                    runtime_target = target.get("runtime_target") or target.get(
-                        "runtime_target_json"
-                    )
-                    if isinstance(runtime_target, str):
-                        try:
-                            runtime_target = json.loads(runtime_target)
-                        except json.JSONDecodeError:
-                            runtime_target = {}
-                    for key in ("service", "service_name", "cloud_run_service"):
-                        value = target.get(key) or (
-                            runtime_target.get(key)
-                            if isinstance(runtime_target, dict)
-                            else None
-                        )
-                        if value:
-                            services.extend(_split_values(str(value)))
-                            break
+                    target_services = _target_service_names(target, defaults)
+                    if _target_enabled(target, defaults):
+                        enabled_target_services.extend(target_services)
+                    else:
+                        disabled_target_services.extend(target_services)
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"CLOUD_RUN_SERVICE_TARGETS_JSON is invalid: {exc}") from exc
 
+    services.extend(enabled_target_services)
+    disabled = set(disabled_target_services) - set(enabled_target_services)
     seen = set()
     unique = []
     for service in services:
-        if service not in seen:
+        if service not in seen and service not in disabled:
             seen.add(service)
             unique.append(service)
     return unique
@@ -111,9 +104,29 @@ def _service_job_aliases(service: str) -> list[str]:
 def _scheduler_job_pattern_for_services(services: list[str]) -> str:
     candidates: list[str] = []
     for service in services:
-        candidates.extend(_service_job_aliases(service))
+        candidates.extend(_scheduler_job_names(service))
     unique = list(dict.fromkeys(candidates))
-    return "|".join(re.escape(candidate) for candidate in unique)
+    if not unique:
+        return ""
+    return r"^(?:" + "|".join(re.escape(candidate) for candidate in unique) + r")\Z"
+
+
+def _scheduler_job_names(service: str) -> list[str]:
+    names = []
+    for alias in _service_job_aliases(service):
+        names.extend(
+            (
+                f"{alias}-scheduler",
+                f"{alias}-probe-scheduler",
+                f"{alias}-precheck-scheduler",
+            )
+        )
+    return list(dict.fromkeys(names))
+
+
+def _job_matches_service(job_name: str, service: str) -> bool:
+    normalized = str(job_name or "").strip().rsplit("/", 1)[-1]
+    return normalized in _scheduler_job_names(service)
 
 
 def _entry_job_name(entry: dict[str, Any]) -> str:
@@ -130,9 +143,44 @@ def _scheduler_entry_since(
     matches = [
         service_since
         for service, service_since in service_since_by_name.items()
-        if any(alias and alias in job_name for alias in _service_job_aliases(service))
+        if _job_matches_service(job_name, service)
     ]
     return max(matches) if matches else fallback
+
+
+def _is_duplicate_scheduler_failure(
+    entry: dict[str, Any],
+    cloud_run_failures_by_service: dict[str, list[dict[str, Any]]],
+) -> bool:
+    scheduler_timestamp = _parse_timestamp(entry.get("timestamp"))
+    job_name = _entry_job_name(entry)
+    if scheduler_timestamp is None or not job_name:
+        return False
+
+    tolerance = dt.timedelta(seconds=SCHEDULER_CLOUD_RUN_DEDUP_SECONDS)
+    for service, failures in cloud_run_failures_by_service.items():
+        if not _job_matches_service(job_name, service):
+            continue
+        for failure in failures:
+            cloud_run_timestamp = _parse_timestamp(failure.get("timestamp"))
+            if (
+                cloud_run_timestamp is not None
+                and abs(scheduler_timestamp - cloud_run_timestamp) <= tolerance
+            ):
+                return True
+    return False
+
+
+def _services_without_success(
+    services: list[str],
+    success_count_by_service: dict[str, int],
+    queried_services: set[str],
+) -> list[str]:
+    return [
+        service
+        for service in services
+        if service in queried_services and success_count_by_service.get(service, 0) == 0
+    ]
 
 
 def _run_gcloud(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -197,22 +245,51 @@ def _format_timestamp(value: dt.datetime) -> str:
     return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _target_payloads() -> list[dict[str, Any]]:
+def _target_configuration() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw_targets = (os.environ.get("CLOUD_RUN_SERVICE_TARGETS_JSON") or "").strip()
     if not raw_targets:
-        return []
+        return [], {}
     try:
         payload = json.loads(raw_targets)
     except json.JSONDecodeError:
-        return []
+        return [], {}
+    defaults = payload.get("defaults") if isinstance(payload, dict) else {}
+    defaults = defaults if isinstance(defaults, dict) else {}
     targets = payload.get("targets") if isinstance(payload, dict) else payload
     if not isinstance(targets, list):
-        return []
-    return [target for target in targets if isinstance(target, dict)]
+        return [], defaults
+    return [target for target in targets if isinstance(target, dict)], defaults
 
 
-def _runtime_target(target: dict[str, Any]) -> dict[str, Any]:
-    runtime_target = target.get("runtime_target") or target.get("runtime_target_json")
+def _target_payloads() -> list[dict[str, Any]]:
+    targets, _defaults = _target_configuration()
+    return targets
+
+
+def _target_field(
+    target: dict[str, Any],
+    defaults: dict[str, Any],
+    *names: str,
+) -> Any:
+    target_env = target.get("env") if isinstance(target.get("env"), dict) else {}
+    defaults_env = defaults.get("env") if isinstance(defaults.get("env"), dict) else {}
+    for source in (target, target_env, defaults, defaults_env):
+        for name in names:
+            if name in source:
+                return source[name]
+    return None
+
+
+def _runtime_target(
+    target: dict[str, Any],
+    defaults: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    runtime_target = _target_field(
+        target,
+        defaults or {},
+        "runtime_target",
+        "runtime_target_json",
+    )
     if isinstance(runtime_target, str):
         try:
             runtime_target = json.loads(runtime_target)
@@ -232,32 +309,57 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return text in {"1", "true", "yes", "y", "on"}
 
 
-def _target_enabled(target: dict[str, Any]) -> bool:
-    runtime_target = _runtime_target(target)
+def _target_enabled(
+    target: dict[str, Any],
+    defaults: dict[str, Any] | None = None,
+) -> bool:
+    defaults = defaults or {}
+    runtime_target = _runtime_target(target, defaults)
+    value = _target_field(
+        target,
+        defaults,
+        "runtime_target_enabled",
+        "RUNTIME_TARGET_ENABLED",
+    )
+    if value is not None:
+        return _coerce_bool(value, True)
     for key in ("runtime_target_enabled", "RUNTIME_TARGET_ENABLED"):
-        if key in target:
-            return _coerce_bool(target.get(key), True)
         if key in runtime_target:
             return _coerce_bool(runtime_target.get(key), True)
     return True
 
 
-def _target_service_names(target: dict[str, Any]) -> list[str]:
-    runtime_target = _runtime_target(target)
-    for key in ("service", "service_name", "cloud_run_service"):
-        value = target.get(key) or runtime_target.get(key)
-        if value:
-            return _split_values(str(value))
+def _target_service_names(
+    target: dict[str, Any],
+    defaults: dict[str, Any] | None = None,
+) -> list[str]:
+    defaults = defaults or {}
+    runtime_target = _runtime_target(target, defaults)
+    value = _target_field(
+        target,
+        defaults,
+        "service",
+        "service_name",
+        "cloud_run_service",
+    )
+    if value is None:
+        for key in ("service", "service_name", "cloud_run_service"):
+            if runtime_target.get(key):
+                value = runtime_target[key]
+                break
+    if value:
+        return _split_values(str(value))
     return []
 
 
 def _region_for_service(service: str) -> str:
-    for target in _target_payloads():
-        if service not in _target_service_names(target):
+    targets, defaults = _target_configuration()
+    for target in targets:
+        if service not in _target_service_names(target, defaults):
             continue
-        runtime_target = _runtime_target(target)
+        runtime_target = _runtime_target(target, defaults)
         for key in ("region", "cloud_run_region", "location"):
-            value = target.get(key) or runtime_target.get(key)
+            value = _target_field(target, defaults, key) or runtime_target.get(key)
             if value:
                 return str(value).strip()
     return (
@@ -505,6 +607,9 @@ def main() -> int:
     issues: list[str] = []
     details: list[str] = []
     success_count = 0
+    success_count_by_service: dict[str, int] = {}
+    queried_services: set[str] = set()
+    cloud_run_failures_by_service: dict[str, list[dict[str, Any]]] = {}
     service_since_by_name: dict[str, dt.datetime] = {}
 
     try:
@@ -527,16 +632,26 @@ def main() -> int:
         except RuntimeError as exc:
             issues.append(f"Cloud Run log query failed for {service}: {exc}")
             continue
+        queried_services.add(service)
         failures = [entry for entry in entries if _is_failure(entry)]
-        success_count += sum(1 for entry in entries if _is_success(entry))
+        cloud_run_failures_by_service[service] = failures
+        service_success_count = sum(1 for entry in entries if _is_success(entry))
+        success_count_by_service[service] = service_success_count
+        success_count += service_success_count
         if failures:
             issues.append(f"{len(failures)} Cloud Run failure log(s) for {service}")
             details.extend(_summarize(entry) for entry in failures[:5])
 
-    if services and require_success and success_count == 0:
-        issues.append(
-            f"no successful Cloud Run request found for {', '.join(services)} in the last {lookback_minutes} minutes"
-        )
+    if services and require_success:
+        for service in _services_without_success(
+            services,
+            success_count_by_service,
+            queried_services,
+        ):
+            issues.append(
+                f"no successful Cloud Run request found for {service} "
+                f"in the last {lookback_minutes} minutes"
+            )
 
     if check_scheduler and scheduler_pattern:
         log_filter = f'resource.type="cloud_scheduler_job" AND timestamp >= "{since_text}"'
@@ -547,7 +662,7 @@ def main() -> int:
                 entries = [
                     entry
                     for entry in entries
-                    if regex.search(str(_labels(entry).get("job_id") or _labels(entry).get("job_name") or ""))
+                    if regex.search(_entry_job_name(entry).rsplit("/", 1)[-1])
                 ]
             failures = []
             for entry in entries:
@@ -556,6 +671,11 @@ def main() -> int:
                 entry_timestamp = _parse_timestamp(entry.get("timestamp"))
                 entry_since = _scheduler_entry_since(entry, service_since_by_name, since)
                 if entry_timestamp and entry_timestamp < entry_since:
+                    continue
+                if _is_duplicate_scheduler_failure(
+                    entry,
+                    cloud_run_failures_by_service,
+                ):
                     continue
                 failures.append(entry)
             if failures:

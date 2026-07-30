@@ -272,13 +272,14 @@ def test_send_telegram_message_logs_non_200_response(capsys):
         def post(*args, **kwargs):
             return FakeResponse()
 
-    send_telegram_message(
+    sent = send_telegram_message(
         "hello",
         token="token",
         chat_id="chat-id",
         requests_module=FakeRequests,
     )
 
+    assert sent is False
     captured = capsys.readouterr()
     assert "Telegram send failed with status 401: unauthorized" in captured.out
 
@@ -296,13 +297,14 @@ def test_send_telegram_message_breaks_market_symbol_auto_links():
             calls.append((args, kwargs))
             return FakeResponse()
 
-    send_telegram_message(
+    sent = send_telegram_message(
         "SOXL.US 预计；00700.HK 持仓；https://example.com 保持原样",
         token="token",
         chat_id="chat-id",
         requests_module=FakeRequests,
     )
 
+    assert sent is True
     payload = calls[0][1]["json"]
     assert payload["text"] == "SOXL.\u2060US 预计；00700.\u2060HK 持仓；https://example.com 保持原样"
 

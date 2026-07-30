@@ -97,6 +97,9 @@ def runtime_target_json(
     account_selector: list[str] | tuple[str, ...] | None = None,
     account_scope: str = "default",
     service_name: str | None = None,
+    market: str | None = None,
+    market_calendar: str | None = None,
+    market_timezone: str | None = None,
 ) -> str:
     payload: dict[str, object] = {
         "platform_id": platform_id,
@@ -109,6 +112,12 @@ def runtime_target_json(
         payload["account_selector"] = list(account_selector)
     if service_name is not None:
         payload["service_name"] = service_name
+    if market is not None:
+        payload["market"] = market
+    if market_calendar is not None:
+        payload["market_calendar"] = market_calendar
+    if market_timezone is not None:
+        payload["market_timezone"] = market_timezone
     payload["execution_mode"] = "paper" if dry_run_only else "live"
     return json.dumps(payload, separators=(",", ":"))
 
@@ -238,6 +247,26 @@ def test_load_platform_runtime_settings_uses_minimal_group_config(monkeypatch):
     assert settings.strategy_plugin_alert_telegram_parse_mode is None
     assert settings.strategy_plugin_alert_telegram_disable_web_page_preview is None
     assert settings.strategy_plugin_alert_telegram_body_max_chars is None
+
+
+def test_runtime_target_market_overrides_account_group_defaults(monkeypatch):
+    monkeypatch.setenv(
+        "RUNTIME_TARGET_JSON",
+        runtime_target_json(
+            SAMPLE_STRATEGY_PROFILE,
+            market="HK",
+            market_calendar="XHKG",
+            market_timezone="Asia/Hong_Kong",
+        ),
+    )
+    monkeypatch.setenv("ACCOUNT_GROUP", "paper")
+    monkeypatch.setenv("IB_ACCOUNT_GROUP_CONFIG_JSON", MINIMAL_GROUP_JSON)
+
+    settings = load_platform_runtime_settings(project_id_resolver=lambda: "project-1")
+
+    assert settings.market == HK_MARKET
+    assert settings.market_calendar == "XHKG"
+    assert settings.market_timezone == "Asia/Hong_Kong"
 
 
 def test_load_platform_runtime_settings_prefers_runtime_target_json(monkeypatch):

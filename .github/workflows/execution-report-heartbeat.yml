@@ -1,6 +1,5 @@
 name: Execution Report Heartbeat
 
-# Schedule disabled; trade/error notifications own unattended alerting.
 on:
   workflow_dispatch:
     inputs:
@@ -17,6 +16,8 @@ on:
         options:
           - "true"
           - "false"
+  schedule:
+    - cron: "20 22 * * *"
 
 env:
   GCP_PROJECT_ID: interactivebrokersquant
@@ -44,6 +45,10 @@ jobs:
       RUNTIME_HEARTBEAT_FAIL_WORKFLOW_ON_ALERT: ${{ inputs.fail_workflow_on_alert || vars.RUNTIME_HEARTBEAT_FAIL_WORKFLOW_ON_ALERT || 'true' }}
       RUNTIME_HEARTBEAT_ACCEPT_STATUSES: ${{ vars.RUNTIME_HEARTBEAT_ACCEPT_STATUSES }}
       RUNTIME_HEARTBEAT_REJECT_STATUSES: ${{ vars.RUNTIME_HEARTBEAT_REJECT_STATUSES }}
+      RUNTIME_HEARTBEAT_MARKET_AWARE: ${{ vars.RUNTIME_HEARTBEAT_MARKET_AWARE || 'true' }}
+      RUNTIME_HEARTBEAT_MARKET_CALENDAR: ${{ vars.IBKR_MARKET_CALENDAR }}
+      RUNTIME_HEARTBEAT_MARKET_TIMEZONE: ${{ vars.IBKR_MARKET_TIMEZONE }}
+      RUNTIME_HEARTBEAT_PUBLICATION_GRACE_MINUTES: ${{ vars.RUNTIME_HEARTBEAT_PUBLICATION_GRACE_MINUTES || '30' }}
       RUNTIME_HEARTBEAT_SCHEDULER_AWARE: ${{ vars.RUNTIME_HEARTBEAT_SCHEDULER_AWARE || 'true' }}
       RUNTIME_HEARTBEAT_SCHEDULER_LOCATION: ${{ vars.RUNTIME_HEARTBEAT_SCHEDULER_LOCATION || vars.CLOUD_RUN_REGION || 'us-central1' }}
       RUNTIME_TARGET_ENABLED: ${{ vars.RUNTIME_TARGET_ENABLED }}
@@ -51,6 +56,7 @@ jobs:
       CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
       CLOUD_RUN_SERVICES: ${{ vars.CLOUD_RUN_SERVICES }}
       CLOUD_RUN_SERVICE_TARGETS_JSON: ${{ vars.CLOUD_RUN_SERVICE_TARGETS_JSON }}
+      CLOUD_SCHEDULER_MAIN_TIME: ${{ vars.CLOUD_SCHEDULER_MAIN_TIME }}
       GLOBAL_TELEGRAM_CHAT_ID: ${{ vars.GLOBAL_TELEGRAM_CHAT_ID }}
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_TOKEN_SECRET_NAME: ${{ vars.TELEGRAM_TOKEN_SECRET_NAME }}
@@ -59,6 +65,19 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Authenticate to Google Cloud
+        id: gcp_auth_primary
+        continue-on-error: true
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT }}
+
+      - name: Wait before Google Cloud authentication retry
+        if: ${{ steps.gcp_auth_primary.outcome == 'failure' }}
+        run: sleep 10
+
+      - name: Retry Google Cloud authentication
+        if: ${{ steps.gcp_auth_primary.outcome == 'failure' }}
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -66,6 +85,12 @@ jobs:
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v3
+
+      - name: Install market calendar
+        continue-on-error: true
+        run: >-
+          python -m pip install --disable-pip-version-check
+          --retries 3 --timeout 30 "pandas-market-calendars==5.4.0"
 
       - name: Check recent execution report
         run: python scripts/execution_report_heartbeat.py
