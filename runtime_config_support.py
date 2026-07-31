@@ -505,7 +505,11 @@ def load_platform_runtime_settings(
             )
         ),
         account_group=account_group,
-        service_name=group_config.service_name,
+        service_name=first_non_empty(
+            os.getenv("K_SERVICE"),
+            runtime_target.service_name,
+            group_config.service_name,
+        ),
         account_ids=group_config.account_ids,
         tg_token=os.getenv("TELEGRAM_TOKEN"),
         tg_chat_id=os.getenv("QSL_GLOBAL_TELEGRAM_CHAT_ID") or os.getenv("GLOBAL_TELEGRAM_CHAT_ID"),

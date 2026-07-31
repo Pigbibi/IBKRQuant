@@ -354,6 +354,32 @@ def test_load_platform_runtime_settings_supports_explicit_group_config_values(mo
     assert settings.notify_lang == "zh"
 
 
+def test_runtime_target_service_name_overrides_shared_account_group_service(monkeypatch):
+    monkeypatch.setenv(
+        "RUNTIME_TARGET_JSON",
+        runtime_target_json(
+            "us_equity_combo_leveraged",
+            dry_run_only=True,
+            deployment_selector="us-combo-shadow",
+            account_scope="us-combo-shadow",
+            service_name="interactive-brokers-us-combo-shadow-service",
+        ),
+    )
+    monkeypatch.setenv("ACCOUNT_GROUP", "shared-live")
+    monkeypatch.setenv(
+        "IB_ACCOUNT_GROUP_CONFIG_JSON",
+        '{"groups":{"shared-live":{"ib_gateway_instance_name":"ib-gateway",'
+        '"ib_gateway_mode":"live","ib_client_id":1,'
+        '"service_name":"interactive-brokers-quant-live-u18336562-service",'
+        '"account_ids":["U123456"]}}}',
+    )
+
+    settings = load_platform_runtime_settings(project_id_resolver=lambda: "project-1")
+
+    assert settings.account_group == "shared-live"
+    assert settings.service_name == "interactive-brokers-us-combo-shadow-service"
+
+
 def test_load_platform_runtime_settings_derives_hk_market_from_account_group(monkeypatch):
     monkeypatch.setenv("RUNTIME_TARGET_JSON", runtime_target_json(SAMPLE_STRATEGY_PROFILE))
     monkeypatch.setenv("ACCOUNT_GROUP", "hk-live")

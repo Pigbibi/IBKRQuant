@@ -84,7 +84,11 @@ class IBKRRuntimeComposer:
             service_name=self.service_name,
             strategy_profile=self.strategy_profile,
             runtime_target=self.runtime_target,
-            account_scope=self.account_group,
+            account_scope=(
+                self.runtime_target.account_scope
+                if self.runtime_target and self.runtime_target.account_scope
+                else self.account_group
+            ),
             account_group=self.account_group,
             project_id=self.project_id,
             instance_name=self.instance_name,

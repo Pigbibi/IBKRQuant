@@ -26,7 +26,7 @@ def test_runtime_composer_builds_runtime_and_config_from_local_builders():
         service_name="interactive-brokers-platform",
         strategy_profile="global_etf_rotation",
         strategy_domain="us_equity",
-        account_group="default",
+        account_group="shared-live",
         project_id="project-1",
         instance_name="ib-gateway",
         account_ids=("U123456",),
@@ -44,7 +44,7 @@ def test_runtime_composer_builds_runtime_and_config_from_local_builders():
             platform_id="interactive_brokers",
             strategy_profile="global_etf_rotation",
             dry_run_only=True,
-            account_scope="default",
+            account_scope="us-combo-shadow",
             service_name="interactive-brokers-platform",
         ),
         strategy_config_source="env",
@@ -87,7 +87,8 @@ def test_runtime_composer_builds_runtime_and_config_from_local_builders():
 
     assert notification_adapters.notification_port == "notification-port"
     assert observed["notification_builder"]["send_message"]
-    assert observed["reporting_builder"]["runtime_assembly"].account_scope == "default"
+    assert observed["reporting_builder"]["runtime_assembly"].account_scope == "us-combo-shadow"
+    assert observed["reporting_builder"]["runtime_assembly"].account_group == "shared-live"
     assert observed["reporting_builder"]["managed_symbols"] == ("AAA", "BIL")
     assert observed["reporting_builder"]["signal_effective_after_trading_days"] == 1
     assert observed["reporting_builder"]["runtime_assembly"].runtime_target.platform_id == "interactive_brokers"
