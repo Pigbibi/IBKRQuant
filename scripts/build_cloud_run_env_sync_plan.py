@@ -140,6 +140,7 @@ SCHEDULER_TIME_ENV = {
 }
 RUN_SCHEDULER_ATTEMPT_DEADLINE = "330s"
 WEEKDAY_CRON_DAYS = frozenset({1, 2, 3, 4, 5})
+US_MARKET_TIMEZONE = "America/New_York"
 CRON_DAY_NAMES = {
     "SUN": 0,
     "MON": 1,
@@ -503,7 +504,8 @@ def _build_target_plan(
         )
 
     if (
-        str(runtime_target.get("execution_mode") or "").strip().lower() == "live"
+        _runtime_target_enabled(env_values)
+        and str(runtime_target.get("execution_mode") or "").strip().lower() == "live"
         and str(env_values.get("IBKR_FORCE_RUN") or "").strip().lower() == "true"
     ):
         raise ValueError("IBKR_FORCE_RUN=true is not allowed for live Cloud Run targets")
@@ -541,7 +543,7 @@ def _build_scheduler_plan(
     if not isinstance(runtime_scheduler, Mapping):
         runtime_scheduler = {}
     market = str(
-        runtime_target.get("market") or env_values.get("IBKR_MARKET") or ""
+        env_values.get("IBKR_MARKET") or runtime_target.get("market") or ""
     ).strip().upper()
     timezone = str(runtime_scheduler.get("timezone") or env_values.get("IBKR_MARKET_TIMEZONE") or "").strip()
     if not timezone:
@@ -561,8 +563,13 @@ def _build_scheduler_plan(
     if (
         market == "US"
         and str(runtime_target.get("execution_mode") or "").strip().lower() == "live"
-        and runtime_target.get("account_selector")
+        and _runtime_target_enabled(env_values)
     ):
+        if timezone != US_MARKET_TIMEZONE:
+            raise ValueError(
+                f"US live account scheduler timezone must be {US_MARKET_TIMEZONE}: "
+                f"{timezone!r}"
+            )
         for key in SCHEDULER_TIME_ENV:
             fields = scheduler[key].split()
             if len(fields) == 2:
