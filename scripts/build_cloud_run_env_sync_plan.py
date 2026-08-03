@@ -52,6 +52,11 @@ from strategy_registry import (  # noqa: E402
     get_platform_profile_status_matrix,
     resolve_strategy_definition,
 )
+from runtime_config_support import (  # noqa: E402
+    DEFAULT_MARKET,
+    DEFAULT_MARKET_TIMEZONE,
+    resolve_market,
+)
 
 
 TARGETS_JSON_ENV = "CLOUD_RUN_SERVICE_TARGETS_JSON"
@@ -61,6 +66,7 @@ SHARED_TARGET_FALLBACK_ENV = frozenset(
         "NOTIFY_LANG",
         "IB_ACCOUNT_GROUP_CONFIG_SECRET_NAME",
         "IBKR_EXECUTION_BACKEND",
+        "IBKR_FORCE_RUN",
         "IBKR_MARKET",
         "IBKR_MARKET_CALENDAR",
         "IBKR_MARKET_CURRENCY",
@@ -100,6 +106,7 @@ PLATFORM_GENERIC_ENV = (
     "IBKR_DRY_RUN_ONLY",
     "IBKR_EXECUTION_DEDUP_ENABLED",
     "IBKR_PAPER_LIQUIDATE_ONLY",
+    "IBKR_FORCE_RUN",
     "IBKR_MIN_RESERVED_CASH_USD",
     "IBKR_RESERVED_CASH_RATIO",
     "IBKR_CASH_ONLY_EXECUTION",
@@ -127,9 +134,9 @@ PLATFORM_GENERIC_ENV = (
     "EXECUTION_REPORT_GCS_URI",
 )
 SCHEDULER_TIME_DEFAULTS = {
-    "main_time": "45 15",
-    "probe_time": "35 9,15",
-    "precheck_time": "45 9",
+    "main_time": "45 15 * * 1-5",
+    "probe_time": "35 9,15 * * 1-5",
+    "precheck_time": "45 9 * * 1-5",
 }
 SCHEDULER_TIME_ENV = {
     "main_time": "CLOUD_SCHEDULER_MAIN_TIME",
@@ -137,6 +144,50 @@ SCHEDULER_TIME_ENV = {
     "precheck_time": "CLOUD_SCHEDULER_PRECHECK_TIME",
 }
 RUN_SCHEDULER_ATTEMPT_DEADLINE = "330s"
+WEEKDAY_CRON_DAYS = frozenset({1, 2, 3, 4, 5})
+CRON_DAY_NAMES = {
+    "SUN": 0,
+    "MON": 1,
+    "TUE": 2,
+    "WED": 3,
+    "THU": 4,
+    "FRI": 5,
+    "SAT": 6,
+}
+
+
+def _cron_day_value(raw: str) -> int:
+    value = raw.strip().upper()
+    if value in CRON_DAY_NAMES:
+        return CRON_DAY_NAMES[value]
+    numeric = int(value)
+    if not 0 <= numeric <= 7:
+        raise ValueError(f"Invalid cron day-of-week value: {raw!r}")
+    return numeric % 7
+
+
+def _cron_days_of_week(raw: str) -> set[int]:
+    days: set[int] = set()
+    for item in raw.split(","):
+        base, separator, raw_step = item.strip().partition("/")
+        step = int(raw_step) if separator else 1
+        if step <= 0:
+            raise ValueError(f"Invalid cron day-of-week step: {item!r}")
+        if base == "*":
+            values = list(range(7))
+        elif "-" in base:
+            raw_start, raw_end = base.split("-", 1)
+            start = _cron_day_value(raw_start)
+            end = _cron_day_value(raw_end)
+            values = [start]
+            while values[-1] != end:
+                values.append((values[-1] + 1) % 7)
+                if len(values) > 7:
+                    raise ValueError(f"Invalid cron day-of-week range: {item!r}")
+        else:
+            values = [_cron_day_value(base)]
+        days.update(values[::step])
+    return days
 
 # Strategy-derived vars: auto-populated from platform-config.json defaults.
 def _derive_strategy_env_defaults(strategy_config: dict) -> dict[str, str]:
@@ -456,6 +507,13 @@ def _build_target_plan(
             + "\n".join(f"  - {item}" for item in missing)
         )
 
+    if (
+        _runtime_target_enabled(env_values)
+        and not _runtime_target_is_dry_run_only(runtime_target, env_values)
+        and str(env_values.get("IBKR_FORCE_RUN") or "").strip().lower() == "true"
+    ):
+        raise ValueError("IBKR_FORCE_RUN=true is not allowed for live Cloud Run targets")
+
     scheduler = _build_scheduler_plan(
         runtime_target=runtime_target,
         target=target,
@@ -488,7 +546,10 @@ def _build_scheduler_plan(
     runtime_scheduler = runtime_target.get("scheduler") if isinstance(runtime_target, Mapping) else {}
     if not isinstance(runtime_scheduler, Mapping):
         runtime_scheduler = {}
-    market = str(env_values.get("IBKR_MARKET") or "").strip().upper()
+    market = resolve_market(
+        env_values.get("IBKR_MARKET") or runtime_target.get("market"),
+        account_group=str(env_values.get("ACCOUNT_GROUP") or ""),
+    )
     timezone = str(runtime_scheduler.get("timezone") or env_values.get("IBKR_MARKET_TIMEZONE") or "").strip()
     if not timezone:
         timezone = "Asia/Hong_Kong" if market == "HK" else "America/New_York"
@@ -504,7 +565,46 @@ def _build_scheduler_plan(
             allow_shared_fallback=True,
         )
         scheduler[key] = str(runtime_scheduler.get(key) or configured_value or SCHEDULER_TIME_DEFAULTS[key])
+    if (
+        market == DEFAULT_MARKET
+        and _runtime_target_enabled(env_values)
+        and not _runtime_target_is_dry_run_only(runtime_target, env_values)
+    ):
+        if timezone != DEFAULT_MARKET_TIMEZONE:
+            raise ValueError(
+                f"US live account scheduler timezone must be {DEFAULT_MARKET_TIMEZONE}: "
+                f"{timezone!r}"
+            )
+        for key in SCHEDULER_TIME_ENV:
+            fields = scheduler[key].split()
+            if len(fields) == 2:
+                scheduler[key] = " ".join([*fields, "*", "*", "1-5"])
+                fields = scheduler[key].split()
+            try:
+                scheduled_days = _cron_days_of_week(fields[4]) if len(fields) == 5 else set()
+            except (TypeError, ValueError):
+                scheduled_days = set()
+            if (
+                len(fields) != 5
+                or fields[2] != "*"
+                or not scheduled_days
+                or not scheduled_days <= WEEKDAY_CRON_DAYS
+            ):
+                raise ValueError(
+                    f"US live account scheduler {key} must be Mon-Fri cron: "
+                    f"{scheduler[key]!r}"
+                )
     return scheduler
+
+
+def _runtime_target_is_dry_run_only(
+    runtime_target: Mapping[str, object],
+    env_values: Mapping[str, str],
+) -> bool:
+    raw_dry_run = env_values.get("IBKR_DRY_RUN_ONLY")
+    if raw_dry_run is None:
+        raw_dry_run = runtime_target.get("dry_run_only")
+    return str(raw_dry_run or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _requires_extended_run_deadline(
@@ -513,12 +613,12 @@ def _requires_extended_run_deadline(
 ) -> bool:
     """Reserve enough scheduler time for any live target backed by IB Gateway."""
     backend = str(env_values.get("IBKR_EXECUTION_BACKEND") or "gateway").strip().lower()
-    raw_dry_run = runtime_target.get("dry_run_only")
-    if raw_dry_run is None:
-        raw_dry_run = env_values.get("IBKR_DRY_RUN_ONLY")
-    dry_run_only = str(raw_dry_run or "").strip().lower() in {"1", "true", "yes", "on"}
     execution_mode = str(runtime_target.get("execution_mode") or "").strip().lower()
-    return backend == "gateway" and execution_mode != "paper" and not dry_run_only
+    return (
+        backend == "gateway"
+        and execution_mode != "paper"
+        and not _runtime_target_is_dry_run_only(runtime_target, env_values)
+    )
 
 
 def _validate_profile_inputs(

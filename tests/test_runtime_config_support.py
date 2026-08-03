@@ -1190,7 +1190,7 @@ def test_build_cloud_run_env_sync_plan_supports_per_service_targets():
         "timezone": "Asia/Hong_Kong",
         "main_time": "10 16",
         "probe_time": "40 9,15",
-        "precheck_time": "45 9",
+        "precheck_time": "45 9 * * 1-5",
         "attempt_deadline": "330s",
     }
     assert "IBKR_FEATURE_SNAPSHOT_PATH" not in slot_a["env"]
@@ -1260,6 +1260,7 @@ def _four_gateway_warmup_payload(probe_time: str) -> dict[str, object]:
                         runtime_target_json(
                             strategy_profile,
                             deployment_selector=account_group,
+                            account_selector=[account_group.removeprefix("live-").upper()],
                             account_scope=account_group,
                             service_name=service_name,
                         )
@@ -1362,6 +1363,261 @@ def test_build_cloud_run_env_sync_plan_does_not_enable_live_dedup_implicitly() -
         assert "IBKR_EXECUTION_DEDUP_ENABLED" in target["remove_env_vars"]
 
 
+def test_build_cloud_run_env_sync_plan_removes_unset_force_run() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    plan = json.loads(result.stdout)
+    for target in plan["targets"]:
+        assert "IBKR_FORCE_RUN" not in target["env"]
+        assert "IBKR_FORCE_RUN" in target["remove_env_vars"]
+
+
+def test_build_cloud_run_env_sync_plan_rejects_force_run_for_live_account() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["runtime_target"]["market"] = "US"
+    target["IBKR_FORCE_RUN"] = True
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    assert result.returncode != 0
+    assert "IBKR_FORCE_RUN=true is not allowed for live Cloud Run targets" in result.stderr
+
+
+def test_build_cloud_run_env_sync_plan_rejects_force_run_for_non_dry_run_target() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["runtime_target"]["market"] = "US"
+    target["runtime_target"]["execution_mode"] = "paper"
+    target["runtime_target"]["dry_run_only"] = False
+    target["IBKR_FORCE_RUN"] = True
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    assert result.returncode != 0
+    assert "IBKR_FORCE_RUN=true is not allowed for live Cloud Run targets" in result.stderr
+
+
+def test_build_cloud_run_env_sync_plan_uses_emitted_dry_run_value() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["runtime_target"]["market"] = "US"
+    target["runtime_target"]["execution_mode"] = "paper"
+    target["runtime_target"]["dry_run_only"] = True
+    target["IBKR_DRY_RUN_ONLY"] = False
+    target["IBKR_FORCE_RUN"] = True
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    assert result.returncode != 0
+    assert "IBKR_FORCE_RUN=true is not allowed for live Cloud Run targets" in result.stderr
+
+
+@pytest.mark.parametrize("schedule_key", ("main_time", "probe_time", "precheck_time"))
+def test_build_cloud_run_env_sync_plan_rejects_weekend_schedule_for_live_account(
+    schedule_key: str,
+) -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["runtime_target"]["market"] = "US"
+    target["runtime_target"]["scheduler"][schedule_key] = "45 15 * * *"
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    assert result.returncode != 0
+    assert f"US live account scheduler {schedule_key} must be Mon-Fri cron" in result.stderr
+
+
+def test_build_cloud_run_env_sync_plan_uses_deployed_market_precedence() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["IBKR_MARKET"] = "US"
+    target["runtime_target"]["market"] = "HK"
+    target["runtime_target"]["scheduler"]["main_time"] = "45 15 * * *"
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    assert result.returncode != 0
+    assert "US live account scheduler main_time must be Mon-Fri cron" in result.stderr
+
+
+@pytest.mark.parametrize("market", (None, "NYSE", "NASDAQ", "USA"))
+def test_build_cloud_run_env_sync_plan_normalizes_us_market_aliases(
+    market: str | None,
+) -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["runtime_target"].pop("market", None)
+    if market is not None:
+        target["IBKR_MARKET"] = market
+    target["runtime_target"]["scheduler"]["main_time"] = "45 15 * * *"
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    assert result.returncode != 0
+    assert "US live account scheduler main_time must be Mon-Fri cron" in result.stderr
+
+
+def test_build_cloud_run_env_sync_plan_rejects_weekend_without_account_selector() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["runtime_target"]["market"] = "US"
+    target["runtime_target"].pop("account_selector")
+    target["runtime_target"]["scheduler"]["main_time"] = "45 15 * * *"
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    assert result.returncode != 0
+    assert "US live account scheduler main_time must be Mon-Fri cron" in result.stderr
+
+
+def test_build_cloud_run_env_sync_plan_allows_disabling_unsafe_live_target() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["runtime_target_enabled"] = False
+    target["runtime_target"]["market"] = "US"
+    target["IBKR_FORCE_RUN"] = True
+    target["runtime_target"]["scheduler"].update(
+        {
+            "main_time": "45 15 * * *",
+            "probe_time": "35 9,15 * * *",
+            "precheck_time": "45 9 * * *",
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    plan = json.loads(result.stdout)
+    assert plan["targets"][0]["env"]["RUNTIME_TARGET_ENABLED"] == "false"
+    assert plan["targets"][0]["env"]["IBKR_FORCE_RUN"] == "true"
+
+
+def test_build_cloud_run_env_sync_plan_rejects_non_us_timezone_for_live_us_target() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["runtime_target"]["market"] = "US"
+    target["runtime_target"]["scheduler"]["timezone"] = "Asia/Hong_Kong"
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    assert result.returncode != 0
+    assert "US live account scheduler timezone must be America/New_York" in result.stderr
+
+
+def test_build_cloud_run_env_sync_plan_normalizes_legacy_live_account_schedule() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["runtime_target"]["market"] = "US"
+    target["runtime_target"]["scheduler"].update(
+        {
+            "main_time": "45 15",
+            "probe_time": "35 9,15",
+            "precheck_time": "45 9",
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    plan = json.loads(result.stdout)
+    first_target = plan["targets"][0]
+    assert first_target["scheduler"] == {
+        "timezone": "America/New_York",
+        "main_time": "45 15 * * 1-5",
+        "probe_time": "35 9,15 * * 1-5",
+        "precheck_time": "45 9 * * 1-5",
+        "attempt_deadline": "330s",
+    }
+
+
+def test_build_cloud_run_env_sync_plan_accepts_weekday_only_cron_variants() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["runtime_target"]["market"] = " us "
+    target["runtime_target"]["scheduler"].update(
+        {
+            "main_time": "45 15 * * 1,3,5",
+            "probe_time": "35 9,15 * * MON-FRI",
+            "precheck_time": "45 9 * * 2-5",
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    plan = json.loads(result.stdout)
+    assert plan["targets"][0]["scheduler"] == {
+        "timezone": "America/New_York",
+        "main_time": "45 15 * * 1,3,5",
+        "probe_time": "35 9,15 * * MON-FRI",
+        "precheck_time": "45 9 * * 2-5",
+        "attempt_deadline": "330s",
+    }
+
+
 def test_build_cloud_run_env_sync_plan_honors_explicit_dedup_override() -> None:
     payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
     payload["targets"][0]["runtime_target"]["overrides"] = {
@@ -1409,6 +1665,7 @@ def test_build_cloud_run_env_sync_plan_honors_global_dedup_env() -> None:
 def test_build_cloud_run_env_sync_plan_accepts_strategy_defined_gateway_schedule() -> None:
     payload = _four_gateway_warmup_payload("35 9,15 * * 1-5")
     first_target = payload["targets"][0]
+    first_target["runtime_target"]["market"] = "HK"
     first_target["runtime_target"]["scheduler"] = {
         "timezone": "Asia/Hong_Kong",
         "main_time": "45 15 * * 1-5",
