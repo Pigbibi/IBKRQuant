@@ -109,6 +109,7 @@ jobs:
       IBKR_DRY_RUN_ONLY: ${{ vars.IBKR_DRY_RUN_ONLY }}
       IBKR_EXECUTION_DEDUP_ENABLED: ${{ vars.IBKR_EXECUTION_DEDUP_ENABLED }}
       IBKR_PAPER_LIQUIDATE_ONLY: ${{ vars.IBKR_PAPER_LIQUIDATE_ONLY }}
+      IBKR_FORCE_RUN: ${{ vars.IBKR_FORCE_RUN }}
       IBKR_MARKET: ${{ vars.IBKR_MARKET }}
       IBKR_MARKET_CALENDAR: ${{ vars.IBKR_MARKET_CALENDAR }}
       IBKR_MARKET_CURRENCY: ${{ vars.IBKR_MARKET_CURRENCY }}
@@ -994,9 +995,9 @@ jobs:
                       [
                           service_name,
                           timezone,
-                          str(scheduler.get("main_time") or configured_time("CLOUD_SCHEDULER_MAIN_TIME", "45 15")),
-                          str(scheduler.get("probe_time") or configured_time("CLOUD_SCHEDULER_PROBE_TIME", "35 9,15")),
-                          str(scheduler.get("precheck_time") or configured_time("CLOUD_SCHEDULER_PRECHECK_TIME", "45 9")),
+                          str(scheduler.get("main_time") or configured_time("CLOUD_SCHEDULER_MAIN_TIME", "45 15 * * 1-5")),
+                          str(scheduler.get("probe_time") or configured_time("CLOUD_SCHEDULER_PROBE_TIME", "35 9,15 * * 1-5")),
+                          str(scheduler.get("precheck_time") or configured_time("CLOUD_SCHEDULER_PRECHECK_TIME", "45 9 * * 1-5")),
                           str(env.get("RUNTIME_TARGET_ENABLED", "true")).strip().lower() or "true",
                           str(scheduler.get("attempt_deadline") or ""),
                       ]
