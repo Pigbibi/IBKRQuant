@@ -1453,6 +1453,28 @@ def test_build_cloud_run_env_sync_plan_uses_deployed_market_precedence() -> None
     assert "US live account scheduler main_time must be Mon-Fri cron" in result.stderr
 
 
+@pytest.mark.parametrize("market", (None, "NYSE", "NASDAQ", "USA"))
+def test_build_cloud_run_env_sync_plan_normalizes_us_market_aliases(
+    market: str | None,
+) -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["runtime_target"].pop("market", None)
+    if market is not None:
+        target["IBKR_MARKET"] = market
+    target["runtime_target"]["scheduler"]["main_time"] = "45 15 * * *"
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    assert result.returncode != 0
+    assert "US live account scheduler main_time must be Mon-Fri cron" in result.stderr
+
+
 def test_build_cloud_run_env_sync_plan_rejects_weekend_without_account_selector() -> None:
     payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
     target = payload["targets"][0]
@@ -1623,6 +1645,7 @@ def test_build_cloud_run_env_sync_plan_honors_global_dedup_env() -> None:
 def test_build_cloud_run_env_sync_plan_accepts_strategy_defined_gateway_schedule() -> None:
     payload = _four_gateway_warmup_payload("35 9,15 * * 1-5")
     first_target = payload["targets"][0]
+    first_target["runtime_target"]["market"] = "HK"
     first_target["runtime_target"]["scheduler"] = {
         "timezone": "Asia/Hong_Kong",
         "main_time": "45 15 * * 1-5",

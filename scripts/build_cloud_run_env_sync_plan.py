@@ -52,6 +52,11 @@ from strategy_registry import (  # noqa: E402
     get_platform_profile_status_matrix,
     resolve_strategy_definition,
 )
+from runtime_config_support import (  # noqa: E402
+    DEFAULT_MARKET,
+    DEFAULT_MARKET_TIMEZONE,
+    resolve_market,
+)
 
 
 TARGETS_JSON_ENV = "CLOUD_RUN_SERVICE_TARGETS_JSON"
@@ -140,7 +145,6 @@ SCHEDULER_TIME_ENV = {
 }
 RUN_SCHEDULER_ATTEMPT_DEADLINE = "330s"
 WEEKDAY_CRON_DAYS = frozenset({1, 2, 3, 4, 5})
-US_MARKET_TIMEZONE = "America/New_York"
 CRON_DAY_NAMES = {
     "SUN": 0,
     "MON": 1,
@@ -542,9 +546,10 @@ def _build_scheduler_plan(
     runtime_scheduler = runtime_target.get("scheduler") if isinstance(runtime_target, Mapping) else {}
     if not isinstance(runtime_scheduler, Mapping):
         runtime_scheduler = {}
-    market = str(
-        env_values.get("IBKR_MARKET") or runtime_target.get("market") or ""
-    ).strip().upper()
+    market = resolve_market(
+        env_values.get("IBKR_MARKET") or runtime_target.get("market"),
+        account_group=str(env_values.get("ACCOUNT_GROUP") or ""),
+    )
     timezone = str(runtime_scheduler.get("timezone") or env_values.get("IBKR_MARKET_TIMEZONE") or "").strip()
     if not timezone:
         timezone = "Asia/Hong_Kong" if market == "HK" else "America/New_York"
@@ -561,13 +566,13 @@ def _build_scheduler_plan(
         )
         scheduler[key] = str(runtime_scheduler.get(key) or configured_value or SCHEDULER_TIME_DEFAULTS[key])
     if (
-        market == "US"
+        market == DEFAULT_MARKET
         and _runtime_target_enabled(env_values)
         and not _runtime_target_is_dry_run_only(runtime_target, env_values)
     ):
-        if timezone != US_MARKET_TIMEZONE:
+        if timezone != DEFAULT_MARKET_TIMEZONE:
             raise ValueError(
-                f"US live account scheduler timezone must be {US_MARKET_TIMEZONE}: "
+                f"US live account scheduler timezone must be {DEFAULT_MARKET_TIMEZONE}: "
                 f"{timezone!r}"
             )
         for key in SCHEDULER_TIME_ENV:
