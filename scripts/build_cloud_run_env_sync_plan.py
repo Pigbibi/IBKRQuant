@@ -505,7 +505,7 @@ def _build_target_plan(
 
     if (
         _runtime_target_enabled(env_values)
-        and str(runtime_target.get("execution_mode") or "").strip().lower() == "live"
+        and not _runtime_target_is_dry_run_only(runtime_target, env_values)
         and str(env_values.get("IBKR_FORCE_RUN") or "").strip().lower() == "true"
     ):
         raise ValueError("IBKR_FORCE_RUN=true is not allowed for live Cloud Run targets")
@@ -562,8 +562,8 @@ def _build_scheduler_plan(
         scheduler[key] = str(runtime_scheduler.get(key) or configured_value or SCHEDULER_TIME_DEFAULTS[key])
     if (
         market == "US"
-        and str(runtime_target.get("execution_mode") or "").strip().lower() == "live"
         and _runtime_target_enabled(env_values)
+        and not _runtime_target_is_dry_run_only(runtime_target, env_values)
     ):
         if timezone != US_MARKET_TIMEZONE:
             raise ValueError(
@@ -592,18 +592,28 @@ def _build_scheduler_plan(
     return scheduler
 
 
+def _runtime_target_is_dry_run_only(
+    runtime_target: Mapping[str, object],
+    env_values: Mapping[str, str],
+) -> bool:
+    raw_dry_run = runtime_target.get("dry_run_only")
+    if raw_dry_run is None:
+        raw_dry_run = env_values.get("IBKR_DRY_RUN_ONLY")
+    return str(raw_dry_run or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _requires_extended_run_deadline(
     runtime_target: Mapping[str, object],
     env_values: Mapping[str, str],
 ) -> bool:
     """Reserve enough scheduler time for any live target backed by IB Gateway."""
     backend = str(env_values.get("IBKR_EXECUTION_BACKEND") or "gateway").strip().lower()
-    raw_dry_run = runtime_target.get("dry_run_only")
-    if raw_dry_run is None:
-        raw_dry_run = env_values.get("IBKR_DRY_RUN_ONLY")
-    dry_run_only = str(raw_dry_run or "").strip().lower() in {"1", "true", "yes", "on"}
     execution_mode = str(runtime_target.get("execution_mode") or "").strip().lower()
-    return backend == "gateway" and execution_mode != "paper" and not dry_run_only
+    return (
+        backend == "gateway"
+        and execution_mode != "paper"
+        and not _runtime_target_is_dry_run_only(runtime_target, env_values)
+    )
 
 
 def _validate_profile_inputs(
