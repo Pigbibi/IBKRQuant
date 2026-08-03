@@ -1415,6 +1415,26 @@ def test_build_cloud_run_env_sync_plan_rejects_force_run_for_non_dry_run_target(
     assert "IBKR_FORCE_RUN=true is not allowed for live Cloud Run targets" in result.stderr
 
 
+def test_build_cloud_run_env_sync_plan_uses_emitted_dry_run_value() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    target = payload["targets"][0]
+    target["runtime_target"]["market"] = "US"
+    target["runtime_target"]["execution_mode"] = "paper"
+    target["runtime_target"]["dry_run_only"] = True
+    target["IBKR_DRY_RUN_ONLY"] = False
+    target["IBKR_FORCE_RUN"] = True
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    assert result.returncode != 0
+    assert "IBKR_FORCE_RUN=true is not allowed for live Cloud Run targets" in result.stderr
+
+
 @pytest.mark.parametrize("schedule_key", ("main_time", "probe_time", "precheck_time"))
 def test_build_cloud_run_env_sync_plan_rejects_weekend_schedule_for_live_account(
     schedule_key: str,

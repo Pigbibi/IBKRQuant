@@ -601,9 +601,9 @@ def _runtime_target_is_dry_run_only(
     runtime_target: Mapping[str, object],
     env_values: Mapping[str, str],
 ) -> bool:
-    raw_dry_run = runtime_target.get("dry_run_only")
+    raw_dry_run = env_values.get("IBKR_DRY_RUN_ONLY")
     if raw_dry_run is None:
-        raw_dry_run = env_values.get("IBKR_DRY_RUN_ONLY")
+        raw_dry_run = runtime_target.get("dry_run_only")
     return str(raw_dry_run or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
