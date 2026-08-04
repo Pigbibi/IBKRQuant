@@ -2,12 +2,55 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+
+_NON_LIVE_ENVELOPE_VERSION = "v1"
+_NON_LIVE_ENVELOPE_STRATEGY_PROFILE = "soxl_soxx_trend_income"
+_NON_LIVE_ENVELOPE_EVIDENCE_SCOPE = "NON_LIVE_STATIC"
+_FORBIDDEN_METADATA_KEY_PARTS = (
+    "account",
+    "apikey",
+    "authorization",
+    "balance",
+    "capital",
+    "cookie",
+    "credential",
+    "fill",
+    "header",
+    "jwt",
+    "notional",
+    "order",
+    "position",
+    "provider",
+    "quantity",
+    "raw",
+    "secret",
+    "token",
+    "verifiedactive",
+)
+_FORBIDDEN_METADATA_VALUES = {"matched", "mismatched", "verified_active"}
+_NON_LIVE_ENVELOPE_KEYS = {
+    "envelope_version",
+    "strategy_profile",
+    "evidence_scope",
+    "reconciliation",
+    "learning_only",
+    "promotion_eligible",
+    "live_ready",
+    "size_zero_required",
+    "no_order",
+    "learning_disposition",
+    "source_revision",
+    "source_digests",
+}
 
 
 def _json_safe(value: Any):
@@ -20,6 +63,95 @@ def _json_safe(value: Any):
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     return value
+
+
+def _normalized_metadata_key(value: Any) -> str:
+    return "".join(character for character in str(value).lower() if character.isalnum())
+
+
+def _reject_non_live_metadata(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized_key = _normalized_metadata_key(key)
+            if any(part in normalized_key for part in _FORBIDDEN_METADATA_KEY_PARTS):
+                raise ValueError("non-live reconciliation metadata contains a value that is not allowed")
+            _reject_non_live_metadata(item)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_non_live_metadata(item)
+        return
+    if isinstance(value, str) and value.strip().lower() in _FORBIDDEN_METADATA_VALUES:
+        raise ValueError("non-live reconciliation metadata contains a value that is not allowed")
+
+
+def build_non_live_reconciliation_envelope(
+    *,
+    learning_disposition: str,
+    source_revision: str | None = None,
+    source_digests: Mapping[str, str] | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the fixed, fail-closed envelope for the SOXL static evidence slice."""
+    if learning_disposition != "negative":
+        raise ValueError("non-live reconciliation envelopes require learning_disposition='negative'")
+    if metadata is not None:
+        _reject_non_live_metadata(metadata)
+
+    envelope = {
+        "envelope_version": _NON_LIVE_ENVELOPE_VERSION,
+        "strategy_profile": _NON_LIVE_ENVELOPE_STRATEGY_PROFILE,
+        "evidence_scope": _NON_LIVE_ENVELOPE_EVIDENCE_SCOPE,
+        "reconciliation": {"status": "MISSING"},
+        "learning_only": True,
+        "promotion_eligible": False,
+        "live_ready": False,
+        "size_zero_required": True,
+        "no_order": True,
+        "learning_disposition": "negative",
+    }
+    if source_revision is not None:
+        _reject_non_live_metadata({"source_revision": source_revision})
+        envelope["source_revision"] = str(source_revision)
+    if source_digests is not None:
+        normalized_digests = {str(key): str(value) for key, value in source_digests.items()}
+        _reject_non_live_metadata(normalized_digests)
+        envelope["source_digests"] = normalized_digests
+    return envelope
+
+
+def canonical_reconciliation_envelope_json(envelope: Mapping[str, Any]) -> str:
+    """Serialize a static non-live envelope deterministically without unsafe metadata."""
+    if set(envelope).difference(_NON_LIVE_ENVELOPE_KEYS):
+        raise ValueError("non-live reconciliation envelope contains a value that is not allowed")
+    required_values = {
+        "envelope_version": _NON_LIVE_ENVELOPE_VERSION,
+        "strategy_profile": _NON_LIVE_ENVELOPE_STRATEGY_PROFILE,
+        "evidence_scope": _NON_LIVE_ENVELOPE_EVIDENCE_SCOPE,
+        "reconciliation": {"status": "MISSING"},
+        "learning_only": True,
+        "promotion_eligible": False,
+        "live_ready": False,
+        "size_zero_required": True,
+        "no_order": True,
+        "learning_disposition": "negative",
+    }
+    if any(envelope.get(key) != value for key, value in required_values.items()):
+        raise ValueError("non-live reconciliation envelope contains a value that is not allowed")
+    _reject_non_live_metadata(
+        {
+            key: envelope[key]
+            for key in ("source_revision", "source_digests")
+            if key in envelope
+        }
+    )
+    return json.dumps(envelope, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def reconciliation_envelope_digest(envelope: Mapping[str, Any]) -> str:
+    """Return the stable SHA-256 digest for a static non-live envelope."""
+    canonical_json = canonical_reconciliation_envelope_json(envelope)
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
 def default_reconciliation_output_path(strategy_profile: str | None) -> Path:
