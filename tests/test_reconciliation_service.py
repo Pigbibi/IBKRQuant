@@ -131,6 +131,44 @@ def test_static_envelope_rejects_password_bearing_metadata(sensitive_key):
         )
 
 
+@pytest.mark.parametrize("sensitive_key", ["private_key", "access_key", "access_key_id"])
+def test_static_envelope_rejects_conventional_access_credentials(sensitive_key):
+    with pytest.raises(ValueError, match="not allowed"):
+        build_non_live_reconciliation_envelope(
+            learning_disposition="negative",
+            metadata={"nested": {sensitive_key: "redacted"}},
+        )
+
+
+@pytest.mark.parametrize("metadata_key", ["max_drawdown", "drawdown_report"])
+def test_static_envelope_accepts_descriptive_drawdown_metadata(metadata_key):
+    envelope = build_non_live_reconciliation_envelope(
+        learning_disposition="negative",
+        metadata={metadata_key: "research-only"},
+    )
+
+    assert envelope["reconciliation"] == {"status": "MISSING"}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("source_revision", 123),
+        ("source_revision", ""),
+        ("source_digests", None),
+        ("source_digests", []),
+        ("source_digests", {"selection": float("nan")}),
+        ("source_digests", {1: "a" * 64}),
+    ],
+)
+def test_canonical_serialization_rejects_invalid_optional_provenance_types(key, value):
+    envelope = build_non_live_reconciliation_envelope(learning_disposition="negative")
+    envelope[key] = value
+
+    with pytest.raises(ValueError, match="not allowed"):
+        canonical_reconciliation_envelope_json(envelope)
+
+
 @pytest.mark.parametrize("assertion", ["VERIFIED-ACTIVE", "verified active"])
 def test_static_envelope_rejects_normalized_forbidden_assertions(assertion):
     with pytest.raises(ValueError, match="not allowed"):

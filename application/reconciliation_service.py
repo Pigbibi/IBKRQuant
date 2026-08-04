@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -15,28 +16,40 @@ import pandas as pd
 _NON_LIVE_ENVELOPE_VERSION = "v1"
 _NON_LIVE_ENVELOPE_STRATEGY_PROFILE = "soxl_soxx_trend_income"
 _NON_LIVE_ENVELOPE_EVIDENCE_SCOPE = "NON_LIVE_STATIC"
-_FORBIDDEN_METADATA_KEY_PARTS = (
-    "account",
-    "apikey",
-    "authorization",
-    "balance",
-    "capital",
-    "cookie",
-    "credential",
-    "fill",
-    "header",
-    "jwt",
-    "notional",
-    "order",
-    "passphrase",
-    "password",
-    "position",
-    "provider",
-    "quantity",
-    "raw",
-    "secret",
-    "token",
-    "verifiedactive",
+_FORBIDDEN_METADATA_KEY_SEQUENCES = frozenset(
+    {
+        ("access", "key"),
+        ("access", "key", "id"),
+        ("accesskey",),
+        ("accesskeyid",),
+        ("account",),
+        ("api", "key"),
+        ("apikey",),
+        ("authorization",),
+        ("balance",),
+        ("capital",),
+        ("cookie",),
+        ("credential",),
+        ("fill",),
+        ("fills",),
+        ("header",),
+        ("headers",),
+        ("jwt",),
+        ("notional",),
+        ("order",),
+        ("passphrase",),
+        ("password",),
+        ("position",),
+        ("private", "key"),
+        ("privatekey",),
+        ("provider",),
+        ("quantity",),
+        ("raw",),
+        ("secret",),
+        ("token",),
+        ("verified", "active"),
+        ("verifiedactive",),
+    }
 )
 _FORBIDDEN_METADATA_VALUES = {"matched", "mismatched", "verifiedactive"}
 _NON_LIVE_ENVELOPE_KEYS = {
@@ -71,11 +84,29 @@ def _normalized_metadata_key(value: Any) -> str:
     return "".join(character for character in str(value).lower() if character.isalnum())
 
 
+def _metadata_key_tokens(value: Any) -> tuple[str, ...]:
+    tokens = []
+    for segment in re.findall(r"[A-Za-z0-9]+", str(value)):
+        tokens.extend(
+            token.lower()
+            for token in re.findall(r"[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|\d+", segment)
+        )
+    return tuple(tokens)
+
+
+def _contains_forbidden_metadata_key(value: Any) -> bool:
+    tokens = _metadata_key_tokens(value)
+    return any(
+        tokens[index : index + len(sequence)] == sequence
+        for sequence in _FORBIDDEN_METADATA_KEY_SEQUENCES
+        for index in range(len(tokens) - len(sequence) + 1)
+    )
+
+
 def _reject_non_live_metadata(value: Any) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
-            normalized_key = _normalized_metadata_key(key)
-            if any(part in normalized_key for part in _FORBIDDEN_METADATA_KEY_PARTS):
+            if _contains_forbidden_metadata_key(key):
                 raise ValueError("non-live reconciliation metadata contains a value that is not allowed")
             _reject_non_live_metadata(item)
         return
@@ -85,6 +116,23 @@ def _reject_non_live_metadata(value: Any) -> None:
         return
     if isinstance(value, str) and _normalized_metadata_key(value) in _FORBIDDEN_METADATA_VALUES:
         raise ValueError("non-live reconciliation metadata contains a value that is not allowed")
+
+
+def _validate_optional_provenance_fields(envelope: Mapping[str, Any]) -> None:
+    if "source_revision" in envelope:
+        source_revision = envelope["source_revision"]
+        if not isinstance(source_revision, str) or not source_revision.strip():
+            raise ValueError("non-live reconciliation envelope contains a value that is not allowed")
+        _reject_non_live_metadata({"source_revision": source_revision})
+
+    if "source_digests" in envelope:
+        source_digests = envelope["source_digests"]
+        if not isinstance(source_digests, Mapping) or any(
+            not isinstance(key, str) or not key.strip() or not isinstance(value, str) or not value.strip()
+            for key, value in source_digests.items()
+        ):
+            raise ValueError("non-live reconciliation envelope contains a value that is not allowed")
+        _reject_non_live_metadata(source_digests)
 
 
 def build_non_live_reconciliation_envelope(
@@ -113,12 +161,11 @@ def build_non_live_reconciliation_envelope(
         "learning_disposition": "negative",
     }
     if source_revision is not None:
-        _reject_non_live_metadata({"source_revision": source_revision})
-        envelope["source_revision"] = str(source_revision)
+        _validate_optional_provenance_fields({"source_revision": source_revision})
+        envelope["source_revision"] = source_revision
     if source_digests is not None:
-        normalized_digests = {str(key): str(value) for key, value in source_digests.items()}
-        _reject_non_live_metadata(normalized_digests)
-        envelope["source_digests"] = normalized_digests
+        _validate_optional_provenance_fields({"source_digests": source_digests})
+        envelope["source_digests"] = dict(source_digests)
     return envelope
 
 
@@ -145,13 +192,7 @@ def canonical_reconciliation_envelope_json(envelope: Mapping[str, Any]) -> str:
                 raise ValueError("non-live reconciliation envelope contains a value that is not allowed")
         elif actual_value != expected_value:
             raise ValueError("non-live reconciliation envelope contains a value that is not allowed")
-    _reject_non_live_metadata(
-        {
-            key: envelope[key]
-            for key in ("source_revision", "source_digests")
-            if key in envelope
-        }
-    )
+    _validate_optional_provenance_fields(envelope)
     return json.dumps(_json_safe(envelope), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
