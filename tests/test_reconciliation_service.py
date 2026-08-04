@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import MappingProxyType
+
 import pytest
 
 from application.reconciliation_service import (
@@ -100,3 +102,47 @@ def test_canonical_serialization_rejects_attempts_to_override_fail_closed_flags(
 
     with pytest.raises(ValueError, match="not allowed"):
         canonical_reconciliation_envelope_json(envelope)
+
+
+@pytest.mark.parametrize(
+    ("key", "integer_substitute"),
+    [
+        ("learning_only", 1),
+        ("promotion_eligible", 0),
+        ("live_ready", 0),
+        ("size_zero_required", 1),
+        ("no_order", 1),
+    ],
+)
+def test_canonical_serialization_rejects_integer_substitutes_for_fixed_boolean_flags(key, integer_substitute):
+    envelope = build_non_live_reconciliation_envelope(learning_disposition="negative")
+    envelope[key] = integer_substitute
+
+    with pytest.raises(ValueError, match="not allowed"):
+        canonical_reconciliation_envelope_json(envelope)
+
+
+@pytest.mark.parametrize("sensitive_key", ["password", "passphrase"])
+def test_static_envelope_rejects_password_bearing_metadata(sensitive_key):
+    with pytest.raises(ValueError, match="not allowed"):
+        build_non_live_reconciliation_envelope(
+            learning_disposition="negative",
+            metadata={sensitive_key: "redacted"},
+        )
+
+
+@pytest.mark.parametrize("assertion", ["VERIFIED-ACTIVE", "verified active"])
+def test_static_envelope_rejects_normalized_forbidden_assertions(assertion):
+    with pytest.raises(ValueError, match="not allowed"):
+        build_non_live_reconciliation_envelope(
+            learning_disposition="negative",
+            metadata={"reconciliation_assertion": assertion},
+        )
+
+
+def test_canonical_serialization_accepts_arbitrary_mapping_envelopes():
+    envelope = build_non_live_reconciliation_envelope(learning_disposition="negative")
+
+    assert canonical_reconciliation_envelope_json(MappingProxyType(envelope)) == canonical_reconciliation_envelope_json(
+        envelope
+    )

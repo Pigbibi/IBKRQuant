@@ -28,6 +28,8 @@ _FORBIDDEN_METADATA_KEY_PARTS = (
     "jwt",
     "notional",
     "order",
+    "passphrase",
+    "password",
     "position",
     "provider",
     "quantity",
@@ -36,7 +38,7 @@ _FORBIDDEN_METADATA_KEY_PARTS = (
     "token",
     "verifiedactive",
 )
-_FORBIDDEN_METADATA_VALUES = {"matched", "mismatched", "verified_active"}
+_FORBIDDEN_METADATA_VALUES = {"matched", "mismatched", "verifiedactive"}
 _NON_LIVE_ENVELOPE_KEYS = {
     "envelope_version",
     "strategy_profile",
@@ -58,7 +60,7 @@ def _json_safe(value: Any):
         return value.isoformat()
     if isinstance(value, Path):
         return str(value)
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
@@ -81,7 +83,7 @@ def _reject_non_live_metadata(value: Any) -> None:
         for item in value:
             _reject_non_live_metadata(item)
         return
-    if isinstance(value, str) and value.strip().lower() in _FORBIDDEN_METADATA_VALUES:
+    if isinstance(value, str) and _normalized_metadata_key(value) in _FORBIDDEN_METADATA_VALUES:
         raise ValueError("non-live reconciliation metadata contains a value that is not allowed")
 
 
@@ -136,8 +138,13 @@ def canonical_reconciliation_envelope_json(envelope: Mapping[str, Any]) -> str:
         "no_order": True,
         "learning_disposition": "negative",
     }
-    if any(envelope.get(key) != value for key, value in required_values.items()):
-        raise ValueError("non-live reconciliation envelope contains a value that is not allowed")
+    for key, expected_value in required_values.items():
+        actual_value = envelope.get(key)
+        if expected_value is True or expected_value is False:
+            if type(actual_value) is not bool or actual_value is not expected_value:
+                raise ValueError("non-live reconciliation envelope contains a value that is not allowed")
+        elif actual_value != expected_value:
+            raise ValueError("non-live reconciliation envelope contains a value that is not allowed")
     _reject_non_live_metadata(
         {
             key: envelope[key]
@@ -145,7 +152,7 @@ def canonical_reconciliation_envelope_json(envelope: Mapping[str, Any]) -> str:
             if key in envelope
         }
     )
-    return json.dumps(envelope, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return json.dumps(_json_safe(envelope), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def reconciliation_envelope_digest(envelope: Mapping[str, Any]) -> str:
