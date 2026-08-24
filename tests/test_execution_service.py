@@ -607,7 +607,9 @@ def test_execute_rebalance_live_cash_only_reuses_projected_sell_proceeds_when_ca
         ("SOXX", "buy", 1),
     ]
     assert summary["orders_filled"][0]["symbol"] == "SOXL"
-    assert summary["orders_submitted"][0]["symbol"] == "SOXX"
+    assert summary["orders_pending"][0]["symbol"] == "SOXX"
+    assert summary["orders_submitted"] == []
+    assert summary["execution_status"] == "pending_reconciliation"
     assert summary["projected_sell_release_value"] == 577.5
     assert summary["orders_skipped"] == []
 
@@ -971,7 +973,8 @@ def test_execute_rebalance_zero_target_sell_uses_position_quantity(monkeypatch, 
         return_summary=True,
     )
 
-    assert summary["execution_status"] == "executed"
+    assert summary["execution_status"] == "pending_reconciliation"
+    assert summary["orders_pending"][0]["symbol"] == "VOO"
     assert len(submitted) == 1
     assert submitted[0].side == "sell"
     assert submitted[0].quantity == 2
@@ -1483,10 +1486,10 @@ def test_execute_rebalance_returns_structured_summary_when_requested(monkeypatch
     )
 
     assert any("execution_lock_acquired" in log for log in trade_logs)
-    assert summary["execution_status"] == "executed"
+    assert summary["execution_status"] == "pending_reconciliation"
     assert summary["mode"] == "paper"
     assert summary["safe_haven_symbol"] == "BOXX"
-    assert summary["orders_submitted"]
+    assert summary["orders_pending"]
     assert summary["target_vs_current"]
 
 
@@ -1613,7 +1616,8 @@ def test_execute_rebalance_sells_cash_sweep_symbol_when_buying_power_is_short(mo
 
     assert any(intent.side == "sell" and intent.symbol == "BOXX" for intent in submitted)
     assert any(intent.side == "buy" and intent.symbol == "VOO" for intent in submitted)
-    assert summary["execution_status"] == "executed"
+    assert summary["execution_status"] == "pending_reconciliation"
+    assert summary["orders_pending"]
     assert any(log.startswith("sell BOXX") for log in trade_logs)
 
 
@@ -1797,7 +1801,8 @@ def test_execute_rebalance_uses_price_fallbacks_for_live_when_quotes_missing(mon
         return_summary=True,
     )
 
-    assert summary["execution_status"] == "executed"
+    assert summary["execution_status"] == "pending_reconciliation"
+    assert summary["orders_pending"]
     assert len(submitted) == 1
     assert submitted[0].symbol == "VOO"
     assert summary["snapshot_price_fallback_used"] is True

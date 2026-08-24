@@ -117,6 +117,23 @@ def test_execution_marker_is_recorded_after_accepted_order():
     )
 
 
+def test_execution_marker_is_recorded_while_broker_order_is_pending_reconciliation():
+    config = IBKRRebalanceConfig(
+        translator=_build_test_translator(),
+        separator="---",
+        execution_dedup_enabled=True,
+    )
+
+    assert _should_record_execution_marker(
+        trade_logs=("order awaiting broker confirmation",),
+        execution_summary={
+            "execution_status": "pending_reconciliation",
+            "orders_pending": [{"symbol": "AAA", "status": "Submitted"}],
+        },
+        config=config,
+    )
+
+
 def test_execution_marker_is_recorded_after_partial_submission_success():
     config = IBKRRebalanceConfig(
         translator=_build_test_translator(),
