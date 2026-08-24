@@ -62,6 +62,9 @@ def translate(key, **kwargs):
             "{symbol} 目标金额 ${diff} 低于 1 股价格 ${price}；"
             "为避免超过目标仓位，小账户本轮保留现金，不回补 {cash_symbols}"
         ),
+        "buy_deferred_small_account": (
+            "small_account_buy_blocked equity={portfolio_equity} minimum={min_recommended_equity}"
+        ),
         "small_account_allocation_drift": "📏 整数股偏离：若本轮订单全部成交，{details}",
         "small_account_allocation_drift_detail": (
             "{symbol} 预计 {projected_weight} vs 目标 {target_weight}（{drift_weight}）"
@@ -847,6 +850,60 @@ def test_execute_rebalance_keeps_safe_haven_cash_when_only_risk_target_is_unbuya
     assert summary["realized_safe_haven_weight"] == 0.0
     boxx_row = next(row for row in summary["target_vs_current"] if row["symbol"] == "BOXX")
     assert boxx_row["target_weight"] == 0.0
+
+
+def test_execute_rebalance_blocks_small_account_buy_but_keeps_strategy_reductions_available(monkeypatch, tmp_path):
+    class FakeIB:
+        def openTrades(self):
+            return []
+
+        def fills(self):
+            return []
+
+        def accountValues(self):
+            return [SimpleNamespace(tag="AvailableFunds", currency="USD", value="500.00")]
+
+    submitted = []
+    monkeypatch.setattr("application.execution_service.time.sleep", lambda _seconds: None)
+
+    trade_logs, summary = execute_rebalance(
+        FakeIB(),
+        {},
+        {},
+        {"equity": 500.0, "buying_power": 500.0},
+        fetch_quote_snapshots=lambda _ib, symbols: {
+            symbol: SimpleNamespace(last_price=100.0) for symbol in symbols
+        },
+        submit_order_intent=lambda _ib, intent: submitted.append(intent),
+        order_intent_cls=OrderIntent,
+        translator=translate,
+        strategy_symbols=["VOO", "BOXX"],
+        strategy_profile="soxl_soxx_trend_income",
+        signal_metadata=_signal_metadata(
+            {"VOO": 0.8, "BOXX": 0.2},
+            risk_symbols=("VOO",),
+            safe_haven_symbols=("BOXX",),
+            trade_date="2026-08-24",
+            small_account_warning=True,
+            min_recommended_equity_usd=1000.0,
+        ),
+        dry_run_only=False,
+        cash_reserve_ratio=0.0,
+        rebalance_threshold_ratio=0.02,
+        limit_buy_premium=1.0,
+        sell_settle_delay_sec=0,
+        execution_lock_dir=tmp_path,
+        return_summary=True,
+    )
+
+    assert submitted == []
+    assert summary["small_account_buy_blocked"] is True
+    assert summary["small_account_buy_block_reason"] == "small_account_below_recommended_equity"
+    assert {order["reason"] for order in summary["orders_skipped"]} == {
+        "small_account_below_recommended_equity"
+    }
+    assert "small_account_below_recommended_equity" in summary["skipped_reasons"]
+    assert any(log.startswith("small_account_buy_blocked") for log in trade_logs)
 
 
 def test_execute_rebalance_routes_order_to_single_account_id(monkeypatch, tmp_path):

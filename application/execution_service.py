@@ -1485,6 +1485,8 @@ def execute_rebalance(
         "small_account_safe_haven_cash_substituted_symbols": [],
         "small_account_whole_share_cash_notes": [],
         "small_account_allocation_drift_notes": [],
+        "small_account_buy_blocked": False,
+        "small_account_buy_block_reason": None,
         "residual_cash_estimate": float(account_values.get("buying_power", 0.0) or 0.0),
         "projected_sell_release_value": 0.0,
         "current_stock_weight": 0.0,
@@ -2128,7 +2130,19 @@ def execute_rebalance(
         if current_mv.get(symbol, 0.0) < float(target or 0.0) - threshold
     ]
     buys_blocked_reason = None
-    if cash_only_execution and pending_sell_release_symbols and buy_needed_symbols:
+    if bool(signal_metadata.get("small_account_warning")) and buy_needed_symbols:
+        buys_blocked_reason = "small_account_below_recommended_equity"
+        execution_summary["small_account_buy_blocked"] = True
+        execution_summary["small_account_buy_block_reason"] = buys_blocked_reason
+        execution_summary["skipped_reasons"].append(buys_blocked_reason)
+        trade_logs.append(
+            translator(
+                "buy_deferred_small_account",
+                portfolio_equity=f"{float(equity or 0.0):,.2f}",
+                min_recommended_equity=f"{float(signal_metadata.get('min_recommended_equity_usd') or 0.0):,.2f}",
+            )
+        )
+    if buys_blocked_reason is None and cash_only_execution and pending_sell_release_symbols and buy_needed_symbols:
         if _rotation_guard_should_block_buys(
             pending_sell_release_symbols=pending_sell_release_symbols,
             buy_needed_symbols=buy_needed_symbols,
