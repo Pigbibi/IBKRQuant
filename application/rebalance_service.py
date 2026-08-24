@@ -960,6 +960,7 @@ def run_strategy_core(
         execution_marker_key = _build_execution_marker_key(config=config, signal_metadata=signal_metadata)
         execution_state_store = getattr(config, "execution_state_store", None)
         execution_already_recorded = False
+        execution_claim_acquired = False
         if execution_marker_key and execution_state_store:
             try:
                 execution_already_recorded = bool(execution_state_store.has_marker(execution_marker_key))
@@ -989,6 +990,24 @@ def run_strategy_core(
                         f"Execution report dedup read failed\nMarker: {execution_marker_key}\n{type(exc).__name__}: {exc}",
                         flush=True,
                     )
+
+        if (
+            not execution_already_recorded
+            and execution_marker_key
+            and execution_state_store
+            and bool(getattr(config, "execution_dedup_enabled", False))
+            and not bool(getattr(config, "dry_run_only", False))
+        ):
+            try:
+                execution_claim_acquired = bool(execution_state_store.claim_marker(
+                    execution_marker_key,
+                    metadata={"platform": "ibkr", "strategy_profile": signal_metadata.get("strategy_profile")},
+                ))
+                execution_already_recorded = not execution_claim_acquired
+            except Exception as exc:
+                raise RuntimeError(
+                    f"IBKR execution claim unavailable; refusing broker submission: {type(exc).__name__}"
+                ) from exc
 
         if execution_already_recorded:
             message = _execution_already_recorded_message(config=config, signal_metadata=signal_metadata)
