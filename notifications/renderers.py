@@ -245,6 +245,7 @@ def _build_order_batch_lines(execution_summary, *, translator) -> list[str]:
     mode = str(execution_summary.get("mode") or "").strip().lower()
     order_groups = [
         ("orders_submitted", "dry_run" if mode == "dry_run" else "submitted"),
+        ("orders_pending", "pending"),
         ("orders_filled", "filled"),
         ("orders_partially_filled", "partial"),
     ]
@@ -650,10 +651,12 @@ def render_trade_notification(
         execution_summary.get(field_name)
         for field_name in (
             "orders_submitted",
+            "orders_pending",
             "orders_filled",
             "orders_partially_filled",
             "orders_skipped",
             "option_orders_submitted",
+            "option_orders_pending",
             "option_orders_filled",
             "option_orders_partially_filled",
             "option_orders_skipped",

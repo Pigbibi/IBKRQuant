@@ -1,4 +1,4 @@
-from notifications.renderers import _summarize_skipped_orders, build_dashboard
+from notifications.renderers import _build_order_batch_lines, _summarize_skipped_orders, build_dashboard
 from notifications.telegram import build_strategy_display_name, build_translator, send_telegram_message
 from strategy_registry import SUPPORTED_STRATEGY_PROFILES
 
@@ -177,6 +177,20 @@ def test_build_translator_supports_chinese():
         )
         == "小账户提示：净值 $0 低于建议 $1,000；整数股和最小仓位限制可能导致实盘无法完全复现回测"
     )
+
+
+def test_pending_order_batch_is_not_rendered_as_submitted_or_filled():
+    lines = _build_order_batch_lines(
+        {
+            "mode": "live",
+            "orders_pending": [
+                {"symbol": "SOXL", "side": "buy", "quantity": 2, "status": "Submitted"}
+            ],
+        },
+        translator=build_translator("zh"),
+    )
+
+    assert lines == ["⏳ 买单待券商最终确认 1个标的: SOXL 2"]
 
 
 def test_skip_order_batch_templates_stay_locale_pure():

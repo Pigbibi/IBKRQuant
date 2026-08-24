@@ -55,6 +55,7 @@ def _record_platform_execution_telemetry(
             "execution_status": summary.get("execution_status"),
             "no_op_reason": summary.get("no_op_reason") or metadata.get("no_op_reason"),
             "orders_submitted": list(summary.get("orders_submitted") or ()),
+            "orders_pending": list(summary.get("orders_pending") or ()),
             "orders_filled": list(summary.get("orders_filled") or ()),
             "orders_skipped": list(summary.get("orders_skipped") or ()),
             "trade_date": summary.get("trade_date") or metadata.get("trade_date"),
@@ -142,9 +143,11 @@ def _execution_summary_has_order_activity(execution_summary: Mapping[str, object
         bool(tuple(summary.get(key) or ()))
         for key in (
             "orders_submitted",
+            "orders_pending",
             "orders_filled",
             "orders_partially_filled",
             "option_orders_submitted",
+            "option_orders_pending",
             "option_orders_filled",
             "option_orders_partially_filled",
         )
@@ -708,9 +711,11 @@ def _should_record_execution_marker(*, trade_logs, execution_summary, config: IB
         return False
     accepted_order_keys = (
         "orders_submitted",
+        "orders_pending",
         "orders_filled",
         "orders_partially_filled",
         "option_orders_submitted",
+        "option_orders_pending",
         "option_orders_filled",
         "option_orders_partially_filled",
     )
@@ -1110,6 +1115,7 @@ def run_strategy_core(
                     "path": str(record_path),
                     "status": record.get("execution_status"),
                     "orders_submitted": len(record.get("orders_submitted") or ()),
+                    "orders_pending": len(record.get("orders_pending") or ()),
                     "orders_filled": len(record.get("orders_filled") or ()),
                     "orders_skipped": len(record.get("orders_skipped") or ()),
                 },
