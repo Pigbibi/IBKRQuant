@@ -57,6 +57,54 @@ def test_telegram_token_falls_back_to_secret_manager(monkeypatch):
     ]
 
 
+def test_cloud_run_log_query_retries_transient_google_error(monkeypatch):
+    attempts = []
+    sleeps = []
+
+    def fake_run_gcloud(command):
+        attempts.append(command)
+        if len(attempts) == 1:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr='HttpError: {"error": {"code": 500, "status": "INTERNAL"}}',
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+
+    monkeypatch.setenv("RUNTIME_GUARD_LOG_QUERY_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("RUNTIME_GUARD_LOG_QUERY_RETRY_SECONDS", "0")
+    monkeypatch.setattr(guard, "_run_gcloud", fake_run_gcloud)
+    monkeypatch.setattr(guard.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    assert guard._run_gcloud_logging("project-1", 'resource.type="cloud_run_revision"', 10) == []
+    assert len(attempts) == 2
+    assert sleeps == [0.0]
+
+
+def test_cloud_run_log_query_does_not_retry_permission_error(monkeypatch):
+    attempts = []
+
+    def fake_run_gcloud(command):
+        attempts.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="ERROR: permission_denied (403)",
+        )
+
+    monkeypatch.setattr(guard, "_run_gcloud", fake_run_gcloud)
+
+    try:
+        guard._run_gcloud_logging("project-1", 'resource.type="cloud_run_revision"', 10)
+    except RuntimeError as exc:
+        assert "permission_denied" in str(exc)
+    else:
+        raise AssertionError("permission errors must fail without retry")
+    assert len(attempts) == 1
+
+
 def test_cloud_run_log_since_uses_latest_ready_revision(monkeypatch):
     monkeypatch.setenv("CLOUD_RUN_REGION", "us-central1")
     observed = []
