@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from application.execution_service import check_order_submitted, execute_rebalance, get_available_buying_power
 from notifications.telegram import build_translator
 from quant_platform_kit.common.models import OrderIntent
+from quant_platform_kit.common.strategy_release import build_runtime_loaded_receipt
 
 
 def _weight_allocation(targets, *, risk_symbols=(), income_symbols=(), safe_haven_symbols=()):
@@ -185,6 +186,67 @@ def test_execute_rebalance_submits_limit_buy_for_underweight_position(monkeypatc
     assert submitted[0].symbol == "VOO"
     assert submitted[0].order_type == "limit"
     assert any(log.startswith("buy VOO") for log in trade_logs)
+
+
+def test_execute_rebalance_paper_admission_blocks_before_calling_the_broker(tmp_path):
+    class FakeIB:
+        def openTrades(self):
+            return []
+
+        def accountValues(self):
+            return [SimpleNamespace(tag="AvailableFunds", currency="USD", value="5000")]
+
+    release = {
+        "release_id": "soxl-p2-v3.20260824",
+        "manifest_sha256": "a" * 64,
+        "strategy_revision": "soxl-p2-v3",
+        "config_sha256": "b" * 64,
+        "risk_policy_sha256": "c" * 64,
+        "evidence_sha256": "d" * 64,
+        "plugin_bundle_sha256": "e" * 64,
+        "effective_session": "2026-04-01",
+    }
+    submitted = []
+
+    trade_logs, summary = execute_rebalance(
+        FakeIB(),
+        {"VOO": 1.0},
+        {},
+        {"equity": 1000.0, "buying_power": 1000.0},
+        fetch_quote_snapshots=lambda _ib, symbols: {
+            symbol: SimpleNamespace(last_price=100.0) for symbol in symbols
+        },
+        submit_order_intent=lambda _ib, intent: submitted.append(intent),
+        order_intent_cls=OrderIntent,
+        translator=translate,
+        strategy_symbols=["VOO"],
+        strategy_profile="soxl_soxx_trend_income",
+        account_group="paper",
+        signal_metadata=_signal_metadata(
+            {"VOO": 1.0},
+            risk_symbols=("VOO",),
+            trade_date="2026-04-01",
+            snapshot_as_of="2026-03-31",
+            effective_date="2026-04-01",
+        ),
+        dry_run_only=False,
+        execution_mode="paper",
+        cash_reserve_ratio=0.0,
+        rebalance_threshold_ratio=0.02,
+        limit_buy_premium=1.005,
+        sell_settle_delay_sec=0,
+        execution_lock_dir=tmp_path,
+        return_summary=True,
+        paper_execution_admission_enabled=True,
+        runtime_release_receipt=build_runtime_loaded_receipt(strategy_release=release),
+        expected_strategy_release=release,
+    )
+
+    assert submitted == []
+    assert summary["execution_status"] == "blocked"
+    assert summary["no_op_reason"] == "paper_execution_admission_blocked"
+    assert summary["paper_execution_admission"]["broker_write_allowed"] is False
+    assert any("paper_execution_admission_blocked" in line for line in trade_logs)
 
 
 def test_execute_rebalance_blocks_when_all_order_submissions_are_rejected(tmp_path):

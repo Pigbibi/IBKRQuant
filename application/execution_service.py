@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from application.paper_execution_admission import evaluate_ibkr_paper_execution_admission
 try:
     from quant_platform_kit.common.cash_sweep import should_sell_cash_sweep_to_fund_whole_share_buy
 except ImportError:  # pragma: no cover - compatibility with older pinned shared wheels
@@ -1416,6 +1417,9 @@ def execute_rebalance(
     execution_lock_dir=None,
     return_summary=False,
     cash_only_execution=True,
+    paper_execution_admission_enabled=False,
+    runtime_release_receipt=None,
+    expected_strategy_release=None,
 ):
     """Execute trades to reach target weights."""
     del target_weights
@@ -1496,6 +1500,7 @@ def execute_rebalance(
         "snapshot_price_fallback_symbols": [],
         "snapshot_price_fallback_count": 0,
         "lock_path": None,
+        "paper_execution_admission": {},
     }
     equity = float(account_values.get("equity", 0) or 0.0)
     cash_only_deleverage_mode = bool(signal_metadata.get("cash_only_deleverage_mode"))
@@ -1726,6 +1731,26 @@ def execute_rebalance(
 
     target_hash = _build_target_hash(target_weights)
     execution_summary["target_vs_current"] = _build_target_diff_rows(target_weights, current_mv, equity)
+    if paper_execution_admission_enabled:
+        paper_admission = evaluate_ibkr_paper_execution_admission(
+            signal_metadata=signal_metadata,
+            strategy_profile=strategy_profile,
+            account_scope=account_group,
+            positions=positions,
+            prices=prices,
+            target_market_values=target_mv,
+            option_order_intents=option_order_intents,
+            runtime_release_receipt=runtime_release_receipt,
+            expected_strategy_release=expected_strategy_release,
+        )
+        execution_summary["paper_execution_admission"] = paper_admission
+        if not paper_admission["broker_write_allowed"]:
+            reason = "paper_execution_admission_blocked"
+            execution_summary["execution_status"] = "blocked"
+            execution_summary["no_op_reason"] = reason
+            execution_summary["skipped_reasons"].append(reason)
+            trade_logs.append(translator("failed", reason=reason))
+            return _finalize_result(trade_logs, execution_summary, return_summary=return_summary)
     if equity > 0:
         current_safe_haven_mv = current_mv.get(safe_haven_symbol, 0.0) if safe_haven_symbol else 0.0
         execution_summary["current_safe_haven_weight"] = float(current_safe_haven_mv / equity)
