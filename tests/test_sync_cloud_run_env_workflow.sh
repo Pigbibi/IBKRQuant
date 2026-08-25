@@ -4,6 +4,12 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
 workflow_file="$repo_dir/.github/workflows/sync-cloud-run-env.yml"
 
+if grep -Fq 'workflow_run:' "$workflow_file"; then
+  echo "deploy workflow must require a manual dispatch" >&2
+  exit 1
+fi
+grep -Fq "if: github.event_name == 'workflow_dispatch'" "$workflow_file"
+
 grep -Fq 'GCP_WORKLOAD_IDENTITY_PROVIDER: projects/303168642265/locations/global/workloadIdentityPools/github-actions/providers/github-main' "$workflow_file"
 grep -Fq 'GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT: ibkr-platform-deploy@interactivebrokersquant.iam.gserviceaccount.com' "$workflow_file"
 grep -Fq 'GCP_SCHEDULER_SERVICE_ACCOUNT: ibkr-platform-scheduler@interactivebrokersquant.iam.gserviceaccount.com' "$workflow_file"

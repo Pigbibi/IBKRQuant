@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -24,6 +25,26 @@ FAILURE_WORDS = (
     "URL_UNREACHABLE",
 )
 SCHEDULER_CLOUD_RUN_DEDUP_SECONDS = 120
+DEFAULT_LOG_QUERY_MAX_ATTEMPTS = 3
+DEFAULT_LOG_QUERY_RETRY_SECONDS = 1.0
+_RETRYABLE_LOG_QUERY_MARKERS = (
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    '"code": 429',
+    '"code": 500',
+    '"code": 502',
+    '"code": 503',
+    '"code": 504',
+    "internal error",
+    "unavailable",
+    "timed out",
+    "network connectivity",
+    "connection reset",
+    "rate limit",
+)
 
 
 def _split_values(raw: str | None) -> list[str]:
@@ -200,6 +221,31 @@ def _run_gcloud_json(args: list[str], context: str) -> Any:
         raise RuntimeError(f"gcloud {context} returned invalid JSON: {exc}") from exc
 
 
+def _log_query_retry_config() -> tuple[int, float]:
+    try:
+        attempts = int(
+            os.environ.get("RUNTIME_GUARD_LOG_QUERY_MAX_ATTEMPTS")
+            or DEFAULT_LOG_QUERY_MAX_ATTEMPTS
+        )
+    except ValueError:
+        attempts = DEFAULT_LOG_QUERY_MAX_ATTEMPTS
+    try:
+        retry_seconds = float(
+            os.environ.get("RUNTIME_GUARD_LOG_QUERY_RETRY_SECONDS")
+            or DEFAULT_LOG_QUERY_RETRY_SECONDS
+        )
+    except ValueError:
+        retry_seconds = DEFAULT_LOG_QUERY_RETRY_SECONDS
+    return max(1, min(attempts, 5)), max(0.0, min(retry_seconds, 10.0))
+
+
+def _is_retryable_log_query_error(detail: str) -> bool:
+    normalized = detail.lower()
+    if "403" in normalized or "permission_denied" in normalized:
+        return False
+    return any(marker in normalized for marker in _RETRYABLE_LOG_QUERY_MARKERS)
+
+
 def _run_gcloud_logging(project: str, log_filter: str, limit: int) -> list[dict[str, Any]]:
     command = [
         "gcloud",
@@ -211,17 +257,24 @@ def _run_gcloud_logging(project: str, log_filter: str, limit: int) -> list[dict[
         "--format=json",
         f"--limit={limit}",
     ]
-    result = subprocess.run(command, text=True, capture_output=True, check=False)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(detail or "gcloud logging read failed")
-    if not result.stdout.strip():
-        return []
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"gcloud returned invalid JSON: {exc}") from exc
-    return payload if isinstance(payload, list) else []
+    max_attempts, retry_seconds = _log_query_retry_config()
+    last_detail = ""
+    for attempt in range(1, max_attempts + 1):
+        result = _run_gcloud(command)
+        if result.returncode == 0:
+            if not result.stdout.strip():
+                return []
+            try:
+                payload = json.loads(result.stdout)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"gcloud returned invalid JSON: {exc}") from exc
+            return payload if isinstance(payload, list) else []
+        last_detail = (result.stderr or result.stdout or "").strip()
+        if attempt >= max_attempts or not _is_retryable_log_query_error(last_detail):
+            break
+        time.sleep(retry_seconds * attempt)
+    suffix = f" after {max_attempts} attempt(s)" if max_attempts > 1 else ""
+    raise RuntimeError((last_detail or "gcloud logging read failed") + suffix)
 
 
 def _parse_timestamp(value: Any) -> dt.datetime | None:
