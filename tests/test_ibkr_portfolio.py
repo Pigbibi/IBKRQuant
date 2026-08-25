@@ -81,15 +81,15 @@ def test_fetch_portfolio_snapshot_prefers_market_currency_cash_balance():
 
         def accountValues(self):
             return [
-                SimpleNamespace(account="U16608560", currency="USD", tag="NetLiquidation", value="1130"),
-                SimpleNamespace(account="U16608560", currency="USD", tag="AvailableFunds", value="885.99"),
-                SimpleNamespace(account="U16608560", currency="USD", tag="CashBalance", value="477.10"),
-                SimpleNamespace(account="U16608560", currency="HKD", tag="CashBalance", value="408.98"),
+                SimpleNamespace(account="U00000000", currency="USD", tag="NetLiquidation", value="1130"),
+                SimpleNamespace(account="U00000000", currency="USD", tag="AvailableFunds", value="885.99"),
+                SimpleNamespace(account="U00000000", currency="USD", tag="CashBalance", value="477.10"),
+                SimpleNamespace(account="U00000000", currency="HKD", tag="CashBalance", value="408.98"),
             ]
 
     snapshot = fetch_portfolio_snapshot(
         MultiCurrencyIB(),
-        account_ids=("U16608560",),
+        account_ids=("U00000000",),
         wait_seconds=0,
         currency="USD",
     )
@@ -107,20 +107,20 @@ def test_fetch_portfolio_snapshot_supports_ibkr_ledger_cash_balance():
 
         def accountValues(self):
             return [
-                SimpleNamespace(account="U16608560", currency="USD", tag="NetLiquidation", value="1130"),
-                SimpleNamespace(account="U16608560", currency="USD", tag="AvailableFunds", value="885.99"),
+                SimpleNamespace(account="U00000000", currency="USD", tag="NetLiquidation", value="1130"),
+                SimpleNamespace(account="U00000000", currency="USD", tag="AvailableFunds", value="885.99"),
                 SimpleNamespace(
-                    account="U16608560",
+                    account="U00000000",
                     currency="USD",
                     tag="$LEDGER-CashBalance",
                     value="477.10",
                 ),
-                SimpleNamespace(account="U16608560", currency="USD", tag="TotalCashValue", value="500.00"),
+                SimpleNamespace(account="U00000000", currency="USD", tag="TotalCashValue", value="500.00"),
             ]
 
     snapshot = fetch_portfolio_snapshot(
         LedgerCashIB(),
-        account_ids=("U16608560",),
+        account_ids=("U00000000",),
         wait_seconds=0,
         currency="USD",
     )
@@ -137,8 +137,8 @@ def test_fetch_portfolio_snapshot_rejects_total_cash_value_as_currency_cash():
 
         def accountValues(self):
             return [
-                SimpleNamespace(account="U16608560", currency="USD", tag="NetLiquidation", value="1130"),
-                SimpleNamespace(account="U16608560", currency="USD", tag="TotalCashValue", value="500.00"),
+                SimpleNamespace(account="U00000000", currency="USD", tag="NetLiquidation", value="1130"),
+                SimpleNamespace(account="U00000000", currency="USD", tag="TotalCashValue", value="500.00"),
             ]
 
     with pytest.raises(
@@ -147,7 +147,7 @@ def test_fetch_portfolio_snapshot_rejects_total_cash_value_as_currency_cash():
     ):
         fetch_portfolio_snapshot(
             AggregateCashIB(),
-            account_ids=("U16608560",),
+            account_ids=("U00000000",),
             wait_seconds=0,
             currency="USD",
         )
@@ -160,14 +160,14 @@ def test_fetch_portfolio_snapshot_allows_negative_cash_balance():
 
         def accountValues(self):
             return [
-                SimpleNamespace(account="U16608560", currency="USD", tag="NetLiquidation", value="2160"),
-                SimpleNamespace(account="U16608560", currency="USD", tag="AvailableFunds", value="1588.89"),
-                SimpleNamespace(account="U16608560", currency="USD", tag="CashBalance", value="-284.0"),
+                SimpleNamespace(account="U00000000", currency="USD", tag="NetLiquidation", value="2160"),
+                SimpleNamespace(account="U00000000", currency="USD", tag="AvailableFunds", value="1588.89"),
+                SimpleNamespace(account="U00000000", currency="USD", tag="CashBalance", value="-284.0"),
             ]
 
     snapshot = fetch_portfolio_snapshot(
         NegativeCashIB(),
-        account_ids=("U16608560",),
+        account_ids=("U00000000",),
         wait_seconds=0,
         currency="USD",
     )
@@ -184,7 +184,7 @@ def test_fetch_portfolio_snapshot_rejects_incomplete_cash_only_account_data():
         def accountValues(self):
             return [
                 SimpleNamespace(
-                    account="U16608560",
+                    account="U00000000",
                     currency="USD",
                     tag="NetLiquidation",
                     value="1130",
@@ -197,7 +197,7 @@ def test_fetch_portfolio_snapshot_rejects_incomplete_cash_only_account_data():
     ):
         fetch_portfolio_snapshot(
             MissingCashIB(),
-            account_ids=("U16608560",),
+            account_ids=("U00000000",),
             wait_seconds=0,
             currency="USD",
         )
@@ -245,7 +245,7 @@ def test_fetch_portfolio_snapshot_allows_explicit_zero_cash_balance():
         def accountValues(self):
             return [
                 SimpleNamespace(
-                    account="U16608560",
+                    account="U00000000",
                     currency="USD",
                     tag="CashBalance",
                     value="0",
@@ -254,7 +254,7 @@ def test_fetch_portfolio_snapshot_allows_explicit_zero_cash_balance():
 
     snapshot = fetch_portfolio_snapshot(
         ZeroCashIB(),
-        account_ids=("U16608560",),
+        account_ids=("U00000000",),
         wait_seconds=0,
         currency="USD",
     )
