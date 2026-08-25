@@ -193,6 +193,11 @@ class IBKRRuntimeComposer:
                 env_reader=self.env_reader,
                 dry_run_only=self.dry_run_only,
                 execution_mode=execution_mode,
+                execution_environment=(
+                    self.runtime_target.execution_environment
+                    if self.runtime_target is not None
+                    else None
+                ),
             ),
             runtime_release_receipt=build_runtime_loaded_receipt(
                 strategy_release=(

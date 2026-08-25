@@ -29,6 +29,7 @@ from quant_platform_kit.common.runtime_command_gate import (
     RuntimeCommandGatePolicy,
     evaluate_runtime_command_gate,
 )
+from quant_platform_kit.common.runtime_target import RuntimeExecutionEnvironment
 
 
 PAPER_EXECUTION_ADMISSION_SCHEMA_VERSION = "ibkr.paper_execution_admission.v1"
@@ -44,17 +45,26 @@ def resolve_paper_execution_admission_enabled(
     env_reader,
     dry_run_only: bool,
     execution_mode: object,
+    execution_environment: object | None = None,
 ) -> bool:
-    """Resolve the opt-in flag and reject every non-PAPER configuration."""
+    """Resolve the opt-in flag and require an explicit broker PAPER target."""
 
     raw_value = str(env_reader("IBKR_PAPER_EXECUTION_ADMISSION_ENABLED", "") or "").strip().lower()
     enabled = raw_value in {"1", "true", "t", "yes", "y", "on"}
     if not enabled:
         return False
     normalized_mode = str(execution_mode or "").strip().lower().replace("-", "_")
-    if dry_run_only or normalized_mode != "paper":
+    normalized_environment = str(
+        getattr(execution_environment, "value", execution_environment) or ""
+    ).strip().lower()
+    if (
+        dry_run_only
+        or normalized_mode != "paper"
+        or normalized_environment != RuntimeExecutionEnvironment.PAPER.value
+    ):
         raise RuntimeError(
-            "IBKR_PAPER_EXECUTION_ADMISSION_ENABLED is only supported for ordinary execution_mode=paper"
+            "IBKR_PAPER_EXECUTION_ADMISSION_ENABLED requires "
+            "dry_run_only=false, execution_mode=paper, and execution_environment=paper"
         )
     return True
 
