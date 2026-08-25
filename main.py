@@ -49,6 +49,7 @@ from quant_platform_kit.notifications.strategy_plugin_alerts import (
     publish_strategy_plugin_alerts as dispatch_strategy_plugin_alerts,
 )
 from quant_platform_kit.common.runtime_assembly import build_runtime_assembly
+from quant_platform_kit.common.strategy_release import build_runtime_loaded_receipt
 from quant_platform_kit.common.runtime_reports import (
     append_runtime_report_error,
     build_runtime_report_base,
@@ -86,6 +87,7 @@ from application.execution_service import (
     get_market_prices as application_get_market_prices,
 )
 from application.paper_liquidation_service import execute_paper_liquidation
+from application.paper_execution_admission import resolve_paper_execution_admission_enabled
 from runtime_logging import build_run_id, emit_runtime_log, extract_cloud_trace
 from runtime_config_support import (
     EXECUTION_BACKEND_GATEWAY,
@@ -571,6 +573,12 @@ def fetch_market_portfolio_snapshot(ib, **kwargs):
 
 def build_broker_adapters(*, dry_run_only_override: bool | None = None):
     effective_dry_run_only = RUNTIME_SETTINGS.dry_run_only if dry_run_only_override is None else bool(dry_run_only_override)
+    effective_execution_mode = "dry_run" if effective_dry_run_only else RUNTIME_SETTINGS.ib_gateway_mode
+    expected_strategy_release = (
+        RUNTIME_SETTINGS.runtime_target.strategy_release
+        if RUNTIME_SETTINGS.runtime_target is not None
+        else None
+    )
     return build_runtime_broker_adapters(
         host_resolver=get_ib_host,
         refresh_host_fn=refresh_ib_host,
@@ -610,7 +618,16 @@ def build_broker_adapters(*, dry_run_only_override: bool | None = None):
         strategy_display_name=strategy_display_name,
         sleep_fn=time.sleep,
         market_currency=MARKET_CURRENCY,
-        execution_mode="dry_run" if effective_dry_run_only else RUNTIME_SETTINGS.ib_gateway_mode,
+        execution_mode=effective_execution_mode,
+        paper_execution_admission_enabled=resolve_paper_execution_admission_enabled(
+            env_reader=os.getenv,
+            dry_run_only=effective_dry_run_only,
+            execution_mode=effective_execution_mode,
+        ),
+        runtime_release_receipt=build_runtime_loaded_receipt(
+            strategy_release=expected_strategy_release,
+        ),
+        expected_strategy_release=expected_strategy_release,
         printer=print,
     )
 

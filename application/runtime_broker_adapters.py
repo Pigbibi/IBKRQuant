@@ -61,6 +61,9 @@ class IBKRRuntimeBrokerAdapters:
     printer: Any = print
     refresh_host_fn: Any = None
     trading_permission_probe_fn: Any = None
+    paper_execution_admission_enabled: bool = False
+    runtime_release_receipt: Any = None
+    expected_strategy_release: Any = None
 
     def validate_configured_accounts(self, ib):
         if not self.account_ids:
@@ -294,6 +297,9 @@ class IBKRRuntimeBrokerAdapters:
             sell_settle_delay_sec=self.sell_settle_delay_sec,
             return_summary=True,
             cash_only_execution=self.cash_only_execution,
+            paper_execution_admission_enabled=self.paper_execution_admission_enabled,
+            runtime_release_receipt=self.runtime_release_receipt,
+            expected_strategy_release=self.expected_strategy_release,
         )
 
     def format_liquidation_orders(self, orders) -> str:
@@ -390,6 +396,9 @@ def build_runtime_broker_adapters(
     printer=print,
     refresh_host_fn=None,
     trading_permission_probe_fn=None,
+    paper_execution_admission_enabled: bool = False,
+    runtime_release_receipt=None,
+    expected_strategy_release=None,
 ) -> IBKRRuntimeBrokerAdapters:
     return IBKRRuntimeBrokerAdapters(
         host_resolver=host_resolver,
@@ -433,4 +442,7 @@ def build_runtime_broker_adapters(
         printer=printer,
         refresh_host_fn=refresh_host_fn,
         trading_permission_probe_fn=trading_permission_probe_fn,
+        paper_execution_admission_enabled=bool(paper_execution_admission_enabled),
+        runtime_release_receipt=runtime_release_receipt,
+        expected_strategy_release=expected_strategy_release,
     )

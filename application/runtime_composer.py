@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from application.runtime_dependencies import IBKRRebalanceConfig, IBKRRebalanceRuntime
+from application.paper_execution_admission import resolve_paper_execution_admission_enabled
 from application.runtime_notification_adapters import build_runtime_notification_adapters
 from application.runtime_reporting_adapters import build_runtime_reporting_adapters
 from quant_platform_kit.common.execution_state import (
@@ -17,6 +18,7 @@ from quant_platform_kit.common.runtime_assembly import build_runtime_assembly
 from quant_platform_kit.common.runtime_target import build_runtime_context_fields
 from quant_platform_kit.common.port_adapters import CallableNotificationPort, CallablePortfolioPort
 from quant_platform_kit.common.runtime_target import RuntimeTarget
+from quant_platform_kit.common.strategy_release import build_runtime_loaded_receipt
 
 
 @dataclass(frozen=True)
@@ -187,6 +189,19 @@ class IBKRRuntimeComposer:
                 project_id=self.project_id,
             ),
             execution_state_account_scope=execution_state_account_scope,
+            paper_execution_admission_enabled=resolve_paper_execution_admission_enabled(
+                env_reader=self.env_reader,
+                dry_run_only=self.dry_run_only,
+                execution_mode=execution_mode,
+            ),
+            runtime_release_receipt=build_runtime_loaded_receipt(
+                strategy_release=(
+                    self.runtime_target.strategy_release if self.runtime_target is not None else None
+                ),
+            ),
+            expected_strategy_release=(
+                self.runtime_target.strategy_release if self.runtime_target is not None else None
+            ),
         )
 
 
