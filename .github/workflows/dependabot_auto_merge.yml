@@ -88,4 +88,4 @@ jobs:
         if: steps.merge_guard.outputs.should_merge == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr merge "${{ steps.pr.outputs.pr_number }}" --repo "${GITHUB_REPOSITORY}" --rebase --delete-branch --match-head-commit "${{ steps.pr.outputs.head_sha }}"
+        run: gh pr merge "${{ steps.pr.outputs.pr_number }}" --repo "${GITHUB_REPOSITORY}" --auto --rebase --delete-branch --match-head-commit "${{ steps.pr.outputs.head_sha }}"
