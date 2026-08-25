@@ -1,8 +1,10 @@
 # IBKR PAPER execution admission
 
 `IBKR_PAPER_EXECUTION_ADMISSION_ENABLED` is an opt-in guard for the ordinary
-IBKR `execution_mode=paper` rebalance path. Its default is disabled. It does
-not apply to `IBKR_PAPER_LIQUIDATE_ONLY`, dry-run previews, live execution,
+IBKR `execution_mode=paper` rebalance path. Its default is disabled. It
+requires the shared runtime target to explicitly declare
+`execution_environment=paper` with `dry_run_only=false`. It does not apply to
+`IBKR_PAPER_LIQUIDATE_ONLY`, local dry-run previews, live execution,
 deployment workflows, or schedulers.
 
 When explicitly enabled, the strategy/control-plane producer must place a QPK
@@ -22,5 +24,5 @@ reconciled exposure facts, and enforced runtime-gate receipts are persisted in
 the normal reconciliation record under `paper_execution_admission`.
 
 Do not enable the flag until an upstream producer can supply this immutable
-command contract. Enabling it for a non-PAPER or dry-run target fails at
-startup rather than silently weakening the guard.
+command contract. Enabling it for a non-PAPER, local dry-run, or ambiguous
+runtime target fails at startup rather than silently weakening the guard.

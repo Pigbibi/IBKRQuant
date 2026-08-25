@@ -623,6 +623,11 @@ def build_broker_adapters(*, dry_run_only_override: bool | None = None):
             env_reader=os.getenv,
             dry_run_only=effective_dry_run_only,
             execution_mode=effective_execution_mode,
+            execution_environment=(
+                RUNTIME_SETTINGS.runtime_target.execution_environment
+                if RUNTIME_SETTINGS.runtime_target is not None
+                else None
+            ),
         ),
         runtime_release_receipt=build_runtime_loaded_receipt(
             strategy_release=expected_strategy_release,

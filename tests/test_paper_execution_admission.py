@@ -14,6 +14,7 @@ from quant_platform_kit.common.paper_execution_admission import (
     build_paper_risk_admission_receipt,
 )
 from quant_platform_kit.common.strategy_release import build_runtime_loaded_receipt
+from quant_platform_kit.common.runtime_target import RuntimeExecutionEnvironment
 
 
 def _release_identity() -> dict[str, str]:
@@ -86,12 +87,21 @@ def test_paper_admission_is_opt_in_and_rejects_non_paper_enablement():
         env_reader=lambda _name, _default: "true",
         dry_run_only=False,
         execution_mode="paper",
+        execution_environment=RuntimeExecutionEnvironment.PAPER,
     )
-    with pytest.raises(RuntimeError, match="execution_mode=paper"):
+    with pytest.raises(RuntimeError, match="execution_environment=paper"):
         resolve_paper_execution_admission_enabled(
             env_reader=lambda _name, _default: "true",
             dry_run_only=False,
             execution_mode="live",
+            execution_environment=RuntimeExecutionEnvironment.LIVE,
+        )
+    with pytest.raises(RuntimeError, match="execution_environment=paper"):
+        resolve_paper_execution_admission_enabled(
+            env_reader=lambda _name, _default: "true",
+            dry_run_only=True,
+            execution_mode="dry_run",
+            execution_environment=RuntimeExecutionEnvironment.DRY_RUN,
         )
 
 
