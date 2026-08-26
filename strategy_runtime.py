@@ -12,6 +12,12 @@ from quant_platform_kit.common.feature_snapshot_runtime import (
     FeatureSnapshotRuntimeSettings,
     evaluate_feature_snapshot_strategy,
 )
+from quant_platform_kit.common.capital_base import (
+    CapitalBaseBinding,
+    CapitalScope,
+    CapitalValuationBasis,
+    build_capital_base_snapshot,
+)
 from quant_platform_kit.common.strategy_plugins import attach_strategy_plugin_metadata
 from quant_platform_kit.ibkr import (
     build_ibkr_strategy_context,
@@ -210,6 +216,74 @@ class LoadedStrategyRuntime:
             return portfolio_snapshot
         metadata["consecutive_losses"] = int(streak)
         return replace(portfolio_snapshot, metadata=metadata)
+
+    def _build_capital_base_capabilities(
+        self,
+        portfolio_snapshot: Any | None,
+    ) -> tuple[dict[str, Any], str]:
+        """Attach strict v2 evidence only to an explicitly scoped IBKR snapshot."""
+
+        runtime_target = self.runtime_settings.runtime_target
+        if portfolio_snapshot is None:
+            return {}, "unavailable:portfolio_snapshot"
+        if runtime_target is None:
+            return {}, "unavailable:runtime_target"
+        account_scope = str(runtime_target.account_scope or "").strip()
+        runtime_scope = str(
+            runtime_target.service_name or runtime_target.deployment_selector or ""
+        ).strip()
+        if not account_scope or not runtime_scope:
+            return {}, "unavailable:runtime_scope"
+        metadata = getattr(portfolio_snapshot, "metadata", {})
+        if not isinstance(metadata, Mapping):
+            return {}, "unavailable:portfolio_metadata"
+        if metadata.get("total_equity_source") != "broker_net_liquidation":
+            return {}, "unavailable:unverified_net_liquidation"
+        source_digest = str(metadata.get("source_digest_sha256") or "").strip()
+        if not source_digest:
+            return {}, "unavailable:source_digest"
+        try:
+            capital_base = build_capital_base_snapshot(
+                portfolio_snapshot,
+                account_scope=account_scope,
+                runtime_scope=runtime_scope,
+                strategy_scope=self.profile,
+                reported_currency="USD",
+                target_currency="USD",
+                fx_rate_to_target=1.0,
+                source_digest_sha256=source_digest,
+                capital_scope=CapitalScope.ACCOUNT,
+                valuation_basis=CapitalValuationBasis.BROKER_ACCOUNT_NET_LIQUIDATION,
+            )
+            binding = CapitalBaseBinding(
+                account_scope=account_scope,
+                runtime_scope=runtime_scope,
+                strategy_scope=self.profile,
+                target_currency="USD",
+                capital_scope=CapitalScope.ACCOUNT,
+                valuation_basis=CapitalValuationBasis.BROKER_ACCOUNT_NET_LIQUIDATION,
+            )
+        except (TypeError, ValueError):
+            return {}, "unavailable:invalid_capital_evidence"
+        return {
+            "capital_base": capital_base,
+            "capital_base_binding": binding,
+        }, "verified:broker_account_net_liquidation"
+
+    def _build_context_capabilities(
+        self,
+        *,
+        ib: Any | None,
+        portfolio_snapshot: Any | None,
+    ) -> dict[str, Any]:
+        capabilities: dict[str, Any] = {}
+        if ib is not None:
+            capabilities["broker_client"] = ib
+        capital_base_capabilities, _status = self._build_capital_base_capabilities(
+            portfolio_snapshot
+        )
+        capabilities.update(capital_base_capabilities)
+        return capabilities
 
     def _prepare_portfolio_snapshot(
         self,
@@ -624,9 +698,10 @@ class LoadedStrategyRuntime:
             market_inputs=market_inputs,
             portfolio_snapshot=portfolio_snapshot,
         )
-        capabilities = {}
-        if ib is not None:
-            capabilities["broker_client"] = ib
+        capabilities = self._build_context_capabilities(
+            ib=ib,
+            portfolio_snapshot=portfolio_snapshot,
+        )
         return build_strategy_context_from_available_inputs(
             entrypoint=self.entrypoint,
             runtime_adapter=context_adapter,
@@ -756,6 +831,7 @@ class LoadedStrategyRuntime:
         )
         metadata = {
             "strategy_profile": self.profile,
+            "capital_base_status": self._build_capital_base_capabilities(portfolio_snapshot)[1],
             "managed_symbols": managed_symbols,
             "status_icon": self.status_icon,
             "dry_run_only": self.runtime_settings.dry_run_only,
@@ -838,6 +914,7 @@ class LoadedStrategyRuntime:
         )
         metadata = {
             "strategy_profile": self.profile,
+            "capital_base_status": self._build_capital_base_capabilities(portfolio_snapshot)[1],
             "managed_symbols": managed_symbols,
             "status_icon": self.status_icon,
             "dry_run_only": self.runtime_settings.dry_run_only,
@@ -899,6 +976,13 @@ class LoadedStrategyRuntime:
             current_holdings=current_holdings,
             ib=ib,
         )
+        ctx = replace(
+            ctx,
+            capabilities=self._build_context_capabilities(
+                ib=ib,
+                portfolio_snapshot=portfolio_snapshot,
+            ),
+        )
         decision = self.entrypoint.evaluate(ctx)
         safe_haven_symbol = next(
             (position.symbol for position in decision.positions if position.role == "safe_haven"),
@@ -916,6 +1000,7 @@ class LoadedStrategyRuntime:
         metadata = self._enrich_portfolio_metadata(
             {
             "strategy_profile": self.profile,
+            "capital_base_status": self._build_capital_base_capabilities(portfolio_snapshot)[1],
             "managed_symbols": managed_symbols,
             "status_icon": self.status_icon,
             "dry_run_only": self.runtime_settings.dry_run_only,
@@ -1044,9 +1129,10 @@ class LoadedStrategyRuntime:
             available_inputs = dict(request.available_inputs)
             if portfolio_snapshot is not None:
                 available_inputs[_PORTFOLIO_SNAPSHOT_INPUT] = portfolio_snapshot
-            capabilities = {}
-            if ib is not None:
-                capabilities["broker_client"] = ib
+            capabilities = self._build_context_capabilities(
+                ib=ib,
+                portfolio_snapshot=portfolio_snapshot,
+            )
             return build_strategy_context_from_available_inputs(
                 entrypoint=request.entrypoint,
                 runtime_adapter=runtime_adapter,

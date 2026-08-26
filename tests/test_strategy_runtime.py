@@ -1,4 +1,5 @@
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ for candidate in (ROOT, QPK_SRC, UES_SRC, HES_SRC):
 
 import strategy_runtime as strategy_runtime_module
 from quant_platform_kit.common.models import PortfolioSnapshot
+from quant_platform_kit.common.runtime_target import build_runtime_target
 from quant_platform_kit.strategy_contracts import (
     PositionTarget,
     StrategyDecision,
@@ -96,6 +98,48 @@ def _build_runtime_settings(
         tg_chat_id=None,
         notify_lang="en",
     )
+
+
+def test_loaded_runtime_attaches_v2_capital_base_only_for_verified_ibkr_net_liquidation():
+    entrypoint = SimpleNamespace(manifest=SimpleNamespace(profile="soxl_soxx_trend_income"))
+    runtime = strategy_runtime_module.LoadedStrategyRuntime(
+        entrypoint=entrypoint,
+        runtime_settings=replace(
+            _build_runtime_settings(profile="soxl_soxx_trend_income"),
+            runtime_target=build_runtime_target(
+                platform_id="ibkr",
+                strategy_profile="soxl_soxx_trend_income",
+                dry_run_only=True,
+                account_scope="paper-account-scope",
+                service_name="ibkr-paper-service",
+                execution_environment="dry_run",
+            ),
+        ),
+        runtime_adapter=StrategyRuntimeAdapter(),
+        logger=lambda _message: None,
+    )
+    verified_snapshot = PortfolioSnapshot(
+        as_of=strategy_runtime_module.pd.Timestamp("2026-08-27", tz="UTC").to_pydatetime(),
+        total_equity=1_000.0,
+        metadata={
+            "total_equity_source": "broker_net_liquidation",
+            "source_digest_sha256": "b" * 64,
+        },
+    )
+
+    capabilities, status = runtime._build_capital_base_capabilities(verified_snapshot)
+
+    assert status == "verified:broker_account_net_liquidation"
+    assert capabilities["capital_base"].to_safe_dict()["valuation_basis"] == "broker_account_net_liquidation"
+    assert capabilities["capital_base_binding"].capital_scope.value == "account"
+
+    unverified = replace(
+        verified_snapshot,
+        metadata={"total_equity_source": "unverified_net_liquidation"},
+    )
+    capabilities, status = runtime._build_capital_base_capabilities(unverified)
+    assert capabilities == {}
+    assert status == "unavailable:unverified_net_liquidation"
 
 
 def test_main_compute_signals_uses_strategy_runtime_decision(strategy_module, monkeypatch):
