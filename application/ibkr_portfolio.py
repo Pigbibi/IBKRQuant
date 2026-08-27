@@ -217,3 +217,124 @@ def fetch_portfolio_snapshot(
             ),
         },
     )
+
+
+def fetch_reconciled_paper_portfolio_snapshot(
+    ib: Any,
+    *,
+    account_ids: Iterable[str] | str | None = None,
+    currency: str = "USD",
+) -> PortfolioSnapshot:
+    """Read a current IBKR portfolio for the isolated paper command consumer.
+
+    ``positions()`` exposes average cost but not a trustworthy current market
+    value.  Delayed-command reconciliation must not mistake cost basis for
+    live exposure, so this intentionally uses IBKR's read-only ``portfolio``
+    snapshot instead.  It is separate from :func:`fetch_portfolio_snapshot`
+    to avoid changing the existing strategy execution path.
+    """
+
+    selected_account_ids = _normalize_account_ids(account_ids)
+    market_currency = str(currency or "USD").strip().upper()
+    portfolio_fn = getattr(ib, "portfolio", None)
+    if not callable(portfolio_fn):
+        raise IBKRPortfolioSnapshotUnavailableError(
+            "IBKR paper command reconciliation requires the read-only portfolio snapshot API."
+        )
+
+    raw_items = []
+    account_queries = selected_account_ids or ("",)
+    try:
+        for account_id in account_queries:
+            raw_items.extend(tuple(portfolio_fn(account_id) or ()))
+    except Exception as exc:
+        raise IBKRPortfolioSnapshotUnavailableError(
+            "IBKR paper command reconciliation could not load current portfolio values."
+        ) from exc
+
+    positions: list[Position] = []
+    seen_positions: set[tuple[str | None, str, str, float]] = set()
+    for item in raw_items:
+        account_id = str(getattr(item, "account", "") or "").strip() or None
+        if not _matches_account(account_id, selected_account_ids):
+            continue
+        contract = getattr(item, "contract", None)
+        symbol = str(getattr(contract, "symbol", "") or "").strip().upper()
+        contract_currency = str(getattr(contract, "currency", "") or "").strip().upper()
+        if not symbol or contract_currency != market_currency:
+            raise IBKRPortfolioSnapshotUnavailableError(
+                "IBKR paper command reconciliation received an incomplete or non-market-currency position."
+            )
+        quantity = _as_float(getattr(item, "position", None))
+        market_value = _as_float(getattr(item, "marketValue", None))
+        average_cost = _as_float(getattr(item, "averageCost", None))
+        if quantity is None or market_value is None or average_cost is None:
+            raise IBKRPortfolioSnapshotUnavailableError(
+                "IBKR paper command reconciliation is missing current position market values."
+            )
+        if quantity == 0.0:
+            continue
+        dedupe_key = (account_id, symbol, str(getattr(contract, "conId", "") or ""), quantity)
+        if dedupe_key in seen_positions:
+            continue
+        seen_positions.add(dedupe_key)
+        positions.append(
+            Position(
+                symbol=symbol,
+                quantity=quantity,
+                market_value=market_value,
+                average_cost=average_cost,
+                currency=contract_currency,
+            )
+        )
+
+    values_by_account_currency: dict[tuple[str | None, str], dict[str, float]] = {}
+    try:
+        raw_account_values = tuple(ib.accountValues() or ())
+    except Exception as exc:
+        raise IBKRPortfolioSnapshotUnavailableError(
+            "IBKR paper command reconciliation could not load account cash values."
+        ) from exc
+    for account_value in raw_account_values:
+        account_id = str(getattr(account_value, "account", "") or "").strip() or None
+        if not _matches_account(account_id, selected_account_ids):
+            continue
+        value_currency = str(getattr(account_value, "currency", "") or "").strip().upper()
+        numeric_value = _as_float(getattr(account_value, "value", None))
+        if value_currency and numeric_value is not None:
+            values_by_account_currency.setdefault((account_id, value_currency), {})[
+                str(getattr(account_value, "tag", "") or "").strip()
+            ] = numeric_value
+    market_currency_cash = _cash_value_for_currency(
+        values_by_account_currency,
+        currency=market_currency,
+    )
+    if market_currency_cash is None:
+        raise IBKRPortfolioSnapshotUnavailableError(
+            f"IBKR paper command reconciliation is missing the {market_currency} cash balance."
+        )
+    total_equity = float(market_currency_cash) + sum(float(position.market_value) for position in positions)
+    return PortfolioSnapshot(
+        as_of=datetime.now(timezone.utc),
+        total_equity=total_equity,
+        cash_balance=float(market_currency_cash),
+        buying_power=float(market_currency_cash),
+        positions=tuple(positions),
+        metadata={
+            "account_ids": selected_account_ids,
+            "currency": market_currency,
+            "market_currency_cash": float(market_currency_cash),
+            "reconciliation_source": "ibkr_portfolio_market_value",
+            "cash_balances": tuple(
+                {
+                    "account_id": account_id,
+                    "currency": value_currency,
+                    **tag_values,
+                }
+                for (account_id, value_currency), tag_values in sorted(
+                    values_by_account_currency.items(),
+                    key=lambda item: ((item[0][0] or ""), item[0][1]),
+                )
+            ),
+        },
+    )

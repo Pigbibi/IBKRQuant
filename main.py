@@ -49,6 +49,7 @@ from quant_platform_kit.notifications.strategy_plugin_alerts import (
     publish_strategy_plugin_alerts as dispatch_strategy_plugin_alerts,
 )
 from quant_platform_kit.common.runtime_assembly import build_runtime_assembly
+from quant_platform_kit.common.execution_commands import build_execution_command_store_from_env
 from quant_platform_kit.common.strategy_release import build_runtime_loaded_receipt
 from quant_platform_kit.common.runtime_reports import (
     append_runtime_report_error,
@@ -79,6 +80,7 @@ from application.monitor_dispatcher import (
 )
 from application.ibkr_portfolio import (
     IBKRPortfolioSnapshotUnavailableError,
+    fetch_reconciled_paper_portfolio_snapshot,
     fetch_portfolio_snapshot,
 )
 from application.execution_service import (
@@ -88,6 +90,10 @@ from application.execution_service import (
 )
 from application.paper_liquidation_service import execute_paper_liquidation
 from application.paper_execution_admission import resolve_paper_execution_admission_enabled
+from application.paper_execution_command_consumer import (
+    consume_due_paper_execution_commands,
+    resolve_paper_execution_command_consumer_enabled,
+)
 from runtime_logging import build_run_id, emit_runtime_log, extract_cloud_trace
 from runtime_config_support import (
     EXECUTION_BACKEND_GATEWAY,
@@ -1127,6 +1133,153 @@ def build_portfolio_snapshot(ib):
     )
 
 
+def _paper_command_consumer_session_date() -> str:
+    return datetime.now(ZoneInfo(MARKET_TIMEZONE)).date().isoformat()
+
+
+def _paper_command_consumer_runtime_is_isolated() -> bool:
+    """Require a disabled, paper-only runtime before any Gateway read occurs."""
+
+    runtime_target = getattr(RUNTIME_SETTINGS, "runtime_target", None)
+    return bool(
+        runtime_target is not None
+        and bool(getattr(RUNTIME_SETTINGS, "dry_run_only", False))
+        and not bool(getattr(RUNTIME_SETTINGS, "runtime_target_enabled", True))
+        and str(getattr(RUNTIME_SETTINGS, "ib_gateway_mode", "") or "").strip().lower() == "paper"
+        and str(getattr(runtime_target, "execution_mode", "") or "").strip().lower() == "paper"
+        and bool(CASH_ONLY_EXECUTION)
+    )
+
+
+def run_paper_execution_command_consumer() -> dict[str, object]:
+    """Explicitly reconcile due commands without creating a broker order.
+
+    This isolated route deliberately avoids the normal rebalance and execution
+    adapters.  It opens the Gateway only after command release and delivery
+    binding checks pass, then reads portfolio and quote evidence to simulate
+    what would have been submitted.
+    """
+
+    if not _paper_command_consumer_runtime_is_isolated():
+        raise RuntimeError(
+            "paper command consumer requires disabled runtime target, IBKR_DRY_RUN_ONLY=true, "
+            "paper Gateway mode, paper runtime target, and CASH_ONLY_EXECUTION=true"
+        )
+    if not resolve_paper_execution_command_consumer_enabled(
+        env_reader=os.getenv,
+        dry_run_only=bool(RUNTIME_SETTINGS.dry_run_only),
+    ):
+        raise RuntimeError("paper command consumer is not enabled")
+
+    runtime_target = RUNTIME_SETTINGS.runtime_target
+    expected_release = getattr(runtime_target, "strategy_release", None)
+    expected_binding = {
+        "platform": "ibkr",
+        "account_scope": str(getattr(runtime_target, "account_scope", "") or "unknown"),
+        "strategy_profile": str(getattr(runtime_target, "strategy_profile", "") or "unknown"),
+    }
+    store = build_execution_command_store_from_env(
+        platform_env_prefix="IBKR",
+        env_reader=os.getenv,
+        project_id=PROJECT_ID,
+    )
+    if not store.cloud_prefix_uri and not store.local_dir:
+        raise RuntimeError("IBKR paper command consumer requires an execution command store")
+
+    reporting_adapters = build_composer(dry_run_only_override=True).build_reporting_adapters()
+    log_context = reporting_adapters.build_log_context(
+        trace_header=request.headers.get("X-Cloud-Trace-Context"),
+    )
+    report = reporting_adapters.build_report(log_context)
+    ib = None
+    quote_cache: dict[str, object] = {}
+
+    def _ib():
+        nonlocal ib
+        if ib is None:
+            # This uses a dry-run-only adapter; its permission validation does
+            # not perform the normal live what-if order check.
+            ib = build_broker_adapters(dry_run_only_override=True).connect_ib()
+        return ib
+
+    def _load_portfolio():
+        return fetch_reconciled_paper_portfolio_snapshot(
+            _ib(),
+            account_ids=ACCOUNT_IDS,
+            currency=MARKET_CURRENCY,
+        )
+
+    def _load_quote(symbol: str):
+        normalized = str(symbol or "").strip().upper()
+        if normalized not in quote_cache:
+            quotes = fetch_market_quote_snapshots(_ib(), (normalized,))
+            quote = quotes.get(normalized)
+            if quote is None:
+                raise IBKRPortfolioSnapshotUnavailableError(
+                    "IBKR paper command reconciliation is missing a current quote."
+                )
+            quote_cache[normalized] = quote
+        return quote_cache[normalized]
+
+    try:
+        reporting_adapters.log_event(
+            log_context,
+            "paper_execution_command_consumer_started",
+            message="Starting isolated read-only IBKR paper command consumer",
+        )
+        result = consume_due_paper_execution_commands(
+            store=store,
+            as_of_session=_paper_command_consumer_session_date(),
+            claimant=str(os.getenv("K_SERVICE") or "ibkr-paper-command-consumer"),
+            portfolio_loader=_load_portfolio,
+            quote_loader=_load_quote,
+            managed_symbols=resolve_reporting_managed_symbols(),
+            runtime_release_receipt=build_runtime_loaded_receipt(
+                strategy_release=expected_release,
+            ),
+            expected_strategy_release=expected_release,
+            expected_command_binding=expected_binding,
+        )
+        finalize_runtime_report(
+            report,
+            status="ok" if result.get("status") == "ok" else "skipped",
+            summary={"paper_execution_command_consumer": result},
+        )
+        reporting_adapters.log_event(
+            log_context,
+            "paper_execution_command_consumer_completed",
+            message="IBKR paper command consumer completed",
+            result_status=result.get("status"),
+            commands_count=len(tuple(result.get("commands") or ())),
+        )
+        return result
+    except Exception as exc:
+        append_runtime_report_error(
+            report,
+            stage="paper_execution_command_consumer",
+            message=str(exc),
+            error_type=type(exc).__name__,
+        )
+        finalize_runtime_report(report, status="error")
+        reporting_adapters.log_event(
+            log_context,
+            "paper_execution_command_consumer_failed",
+            message="IBKR paper command consumer failed",
+            severity="ERROR",
+            error_type=type(exc).__name__,
+        )
+        raise
+    finally:
+        try:
+            report_path = reporting_adapters.persist_execution_report(report)
+            print(f"execution_report {report_path}", flush=True)
+        except Exception as persist_exc:
+            print(f"failed to persist execution report: {persist_exc}", flush=True)
+        disconnect_fn = getattr(ib, "disconnect", None)
+        if callable(disconnect_fn):
+            disconnect_fn()
+
+
 def get_market_prices(ib, symbols):
     return build_broker_adapters().get_market_prices(ib, symbols)
 
@@ -1791,6 +1944,17 @@ def _persist_dry_run_report_with_grace(
 @app.route("/dry-run", methods=["POST", "GET"])
 def handle_dry_run():
     return _handle_dry_run_with_deadline()
+
+
+@app.route("/paper-command-consumer", methods=["POST"])
+def handle_paper_execution_command_consumer():
+    """Manual-only endpoint for paper command reconciliation evidence."""
+
+    try:
+        result = run_paper_execution_command_consumer()
+    except Exception as exc:
+        return _handle_route_runtime_error(exc, route_label="POST /paper-command-consumer")
+    return json.dumps(result, ensure_ascii=False), 200, {"Content-Type": "application/json"}
 
 
 @app.route("/probe", methods=["POST", "GET"])

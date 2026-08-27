@@ -15,12 +15,73 @@ def test_cloud_run_route_contracts_are_registered(strategy_module):
     assert route_methods(strategy_module) == {
         "/run": ["GET", "POST"],
         "/dry-run": ["GET", "POST"],
+        "/paper-command-consumer": ["POST"],
         "/probe": ["GET", "POST"],
         "/monitor-dispatch": ["GET", "POST"],
         "/health": ["GET"],
         "/healthz": ["GET"],
         "/static/<path:filename>": ["GET"],
     }
+
+
+def test_paper_command_consumer_does_not_open_gateway_without_due_command(
+    strategy_module_factory,
+    monkeypatch,
+    tmp_path,
+):
+    strategy_module = strategy_module_factory(
+        IBKR_DRY_RUN_ONLY="true",
+        RUNTIME_TARGET_ENABLED="false",
+        IBKR_PAPER_EXECUTION_COMMAND_CONSUMER_ENABLED="true",
+        IBKR_EXECUTION_COMMAND_DIR=str(tmp_path / "commands"),
+        IB_ACCOUNT_GROUP_CONFIG_JSON=(
+            '{"groups":{"default":{"ib_gateway_instance_name":"127.0.0.1",'
+            '"ib_gateway_mode":"paper","ib_client_id":1,"account_ids":["DU123"]}}}'
+        ),
+        RUNTIME_TARGET_JSON=json.dumps(
+            {
+                "platform_id": "ibkr",
+                "strategy_profile": "global_etf_rotation",
+                "account_scope": "paper",
+                "dry_run_only": True,
+                "execution_mode": "paper",
+            },
+            separators=(",", ":"),
+        ),
+    )
+    observed = {"gateway": 0}
+
+    class ReportingAdapters:
+        def build_log_context(self, **_kwargs):
+            return object()
+
+        def build_report(self, _context):
+            return {}
+
+        def log_event(self, *_args, **_kwargs):
+            return None
+
+        def persist_execution_report(self, _report):
+            return "/tmp/report.json"
+
+    monkeypatch.setattr(
+        strategy_module,
+        "build_composer",
+        lambda **_kwargs: types.SimpleNamespace(build_reporting_adapters=lambda: ReportingAdapters()),
+    )
+
+    def fail_if_gateway_opens(**_kwargs):
+        observed["gateway"] += 1
+        raise AssertionError("no due command must not open IBKR Gateway")
+
+    monkeypatch.setattr(strategy_module, "build_broker_adapters", fail_if_gateway_opens)
+
+    with strategy_module.app.test_request_context("/paper-command-consumer", method="POST"):
+        body, status, _headers = strategy_module.handle_paper_execution_command_consumer()
+
+    assert status == 200
+    assert json.loads(body)["status"] == "blocked"
+    assert observed["gateway"] == 0
 
 
 def test_health_route_returns_ok(strategy_module):
