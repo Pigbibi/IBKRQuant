@@ -96,7 +96,7 @@ jobs:
         run: python scripts/execution_report_heartbeat.py
 
       - name: Publish read-only runtime execution evidence
-        uses: QuantStrategyLab/QuantRuntimeSettings/actions/publish-runtime-execution-evidence@e6ac155e3f602d0a54e24cc6710ded5108f6af84
+        uses: QuantStrategyLab/QuantRuntimeSettings/actions/publish-runtime-execution-evidence@f28bee6a4e28e2aead5fb37bd3213c12dd419e29
         with:
           source-id: runtime-reports-ibkr
           report-platform: ibkr
