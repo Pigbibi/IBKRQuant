@@ -96,10 +96,10 @@ jobs:
         run: python scripts/execution_report_heartbeat.py
 
       - name: Publish read-only runtime execution evidence
-        uses: QuantStrategyLab/QuantRuntimeSettings/actions/publish-runtime-execution-evidence@f28bee6a4e28e2aead5fb37bd3213c12dd419e29
+        uses: QuantStrategyLab/QuantRuntimeSettings/actions/publish-runtime-execution-evidence@361341c23dd5cd638651d1766411efd98e1885fc
         with:
           source-id: runtime-reports-ibkr
-          report-platform: ibkr
+          report-platform: interactive_brokers
           report-prefix: ${{ vars.RUNTIME_HEARTBEAT_GCS_URIS || vars.EXECUTION_REPORT_GCS_URI }}
           sync-url: ${{ vars.EXECUTION_EVIDENCE_SYNC_URL }}
         env:
