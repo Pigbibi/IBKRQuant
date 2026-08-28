@@ -585,6 +585,19 @@ def build_broker_adapters(*, dry_run_only_override: bool | None = None):
         if RUNTIME_SETTINGS.runtime_target is not None
         else None
     )
+
+    def connect_runtime_ib(host, port, client_id, *, timeout):
+        # Shadow and dry-run cycles need account and market reads only.  Mark
+        # their Gateway sessions read-only so they cannot trigger an IBKR
+        # write-access confirmation or acquire trading authority.
+        return ibkr_connect_ib(
+            host,
+            port,
+            client_id,
+            timeout=timeout,
+            readonly=effective_dry_run_only,
+        )
+
     return build_runtime_broker_adapters(
         host_resolver=get_ib_host,
         refresh_host_fn=refresh_ib_host,
@@ -596,7 +609,7 @@ def build_broker_adapters(*, dry_run_only_override: bool | None = None):
         connect_retry_delay_seconds=IB_CONNECT_RETRY_DELAY_SECONDS,
         client_id_retry_offset=IB_CLIENT_ID_RETRY_OFFSET,
         ensure_event_loop_fn=ensure_event_loop,
-        connect_ib_fn=ibkr_connect_ib,
+        connect_ib_fn=connect_runtime_ib,
         fetch_portfolio_snapshot_fn=fetch_market_portfolio_snapshot,
         fetch_quote_snapshots_fn=fetch_market_quote_snapshots,
         submit_order_intent_fn=submit_market_order_intent,
