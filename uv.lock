@@ -17,7 +17,7 @@ resolution-markers = [
 ]
 
 [manifest]
-overrides = [{ name = "quant-platform-kit", git = "https://github.com/QuantStrategyLab/QuantPlatformKit.git?rev=aae333fe8b3fe5aeb32e1ff135ab14ea7db32420" }]
+overrides = [{ name = "quant-platform-kit", git = "https://github.com/QuantStrategyLab/QuantPlatformKit.git?rev=4d716cb1c6b42747fb96be3d398c528b26cd5826" }]
 
 [[package]]
 name = "beautifulsoup4"
@@ -791,7 +791,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'" },
     { name = "pytest-cov", marker = "extra == 'test'" },
     { name = "pytz" },
-    { name = "quant-platform-kit", git = "https://github.com/QuantStrategyLab/QuantPlatformKit.git?rev=aae333fe8b3fe5aeb32e1ff135ab14ea7db32420" },
+    { name = "quant-platform-kit", git = "https://github.com/QuantStrategyLab/QuantPlatformKit.git?rev=4d716cb1c6b42747fb96be3d398c528b26cd5826" },
     { name = "requests" },
     { name = "ruff", marker = "extra == 'test'" },
     { name = "us-equity-strategies", git = "https://github.com/QuantStrategyLab/UsEquityStrategies.git?rev=6776c59d709848abdfb513ef5f1853be029f99b1" },
@@ -1327,7 +1327,7 @@ wheels = [
 [[package]]
 name = "quant-platform-kit"
 version = "0.10.0"
-source = { git = "https://github.com/QuantStrategyLab/QuantPlatformKit.git?rev=aae333fe8b3fe5aeb32e1ff135ab14ea7db32420#aae333fe8b3fe5aeb32e1ff135ab14ea7db32420" }
+source = { git = "https://github.com/QuantStrategyLab/QuantPlatformKit.git?rev=4d716cb1c6b42747fb96be3d398c528b26cd5826#4d716cb1c6b42747fb96be3d398c528b26cd5826" }
 
 [[package]]
 name = "requests"

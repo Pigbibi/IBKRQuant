@@ -20,7 +20,7 @@ def test_ensure_event_loop_creates_loop_in_worker_thread(strategy_module):
     assert not loop.is_closed()
 
 
-def test_connect_ib_prepares_event_loop_before_connect(strategy_module, monkeypatch):
+def test_connect_ib_prepares_readonly_event_loop_before_dry_run_connect(strategy_module, monkeypatch):
     observed = {}
 
     def fake_ibkr_connect(host, port, client_id, **kwargs):
@@ -32,7 +32,23 @@ def test_connect_ib_prepares_event_loop_before_connect(strategy_module, monkeypa
     with ThreadPoolExecutor(max_workers=1) as executor:
         executor.submit(strategy_module.connect_ib).result()
 
-    assert observed["args"] == ("127.0.0.1", 4001, 1, {"timeout": 60})
+    assert observed["args"] == ("127.0.0.1", 4001, 1, {"timeout": 60, "readonly": True})
+
+
+def test_live_runtime_adapter_keeps_writable_gateway_session(strategy_module_factory, monkeypatch):
+    module = strategy_module_factory(IBKR_DRY_RUN_ONLY="false")
+    observed = {}
+
+    def fake_ibkr_connect(host, port, client_id, **kwargs):
+        observed["args"] = (host, port, client_id, kwargs)
+        return object()
+
+    monkeypatch.setattr(module, "ibkr_connect_ib", fake_ibkr_connect)
+
+    adapters = module.build_broker_adapters()
+    adapters.connect_ib_fn("127.0.0.1", 4001, 1, timeout=60)
+
+    assert observed["args"] == ("127.0.0.1", 4001, 1, {"timeout": 60, "readonly": False})
 
 
 def test_connect_ib_retries_with_offset_client_ids(strategy_module_factory, monkeypatch):
