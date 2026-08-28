@@ -707,7 +707,7 @@ wheels = [
 [[package]]
 name = "hk-equity-strategies"
 version = "0.4.7"
-source = { git = "https://github.com/QuantStrategyLab/HkEquityStrategies.git?rev=e385485cf1db306ce7efd30bfb9e181139767fa7#e385485cf1db306ce7efd30bfb9e181139767fa7" }
+source = { git = "https://github.com/QuantStrategyLab/HkEquityStrategies.git?rev=4784a78ffc6bab2639553c100c086ddee7746f6b#4784a78ffc6bab2639553c100c086ddee7746f6b" }
 dependencies = [
     { name = "pandas" },
     { name = "quant-platform-kit" },
@@ -783,7 +783,7 @@ requires-dist = [
     { name = "google-cloud-secret-manager" },
     { name = "google-cloud-storage" },
     { name = "gunicorn" },
-    { name = "hk-equity-strategies", git = "https://github.com/QuantStrategyLab/HkEquityStrategies.git?rev=e385485cf1db306ce7efd30bfb9e181139767fa7" },
+    { name = "hk-equity-strategies", git = "https://github.com/QuantStrategyLab/HkEquityStrategies.git?rev=4784a78ffc6bab2639553c100c086ddee7746f6b" },
     { name = "ib-insync" },
     { name = "numpy" },
     { name = "pandas" },
@@ -794,7 +794,7 @@ requires-dist = [
     { name = "quant-platform-kit", git = "https://github.com/QuantStrategyLab/QuantPlatformKit.git?rev=aae333fe8b3fe5aeb32e1ff135ab14ea7db32420" },
     { name = "requests" },
     { name = "ruff", marker = "extra == 'test'" },
-    { name = "us-equity-strategies", git = "https://github.com/QuantStrategyLab/UsEquityStrategies.git?rev=6776c59d709848abdfb513ef5f1853be029f99b1" },
+    { name = "us-equity-strategies", git = "https://github.com/QuantStrategyLab/UsEquityStrategies.git?rev=c3959da4fc9de2480646b083ad51fff5f68d9a00" },
     { name = "yfinance" },
 ]
 provides-extras = ["test"]
@@ -1493,7 +1493,7 @@ wheels = [
 [[package]]
 name = "us-equity-strategies"
 version = "0.7.60"
-source = { git = "https://github.com/QuantStrategyLab/UsEquityStrategies.git?rev=6776c59d709848abdfb513ef5f1853be029f99b1#6776c59d709848abdfb513ef5f1853be029f99b1" }
+source = { git = "https://github.com/QuantStrategyLab/UsEquityStrategies.git?rev=c3959da4fc9de2480646b083ad51fff5f68d9a00#c3959da4fc9de2480646b083ad51fff5f68d9a00" }
 dependencies = [
     { name = "pandas" },
     { name = "pytz" },
