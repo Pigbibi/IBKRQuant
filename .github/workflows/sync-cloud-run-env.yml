@@ -68,6 +68,7 @@ jobs:
       ENABLE_GITHUB_ENV_SYNC: ${{ vars.ENABLE_GITHUB_ENV_SYNC }}
       ENABLE_MAIN_PUSH_CLOUD_RUN_AUTOMATION: ${{ vars.ENABLE_MAIN_PUSH_CLOUD_RUN_AUTOMATION }}
       QSL_ENABLE_CLOUD_RUN_AUTOMATION: ${{ vars.QSL_ENABLE_CLOUD_RUN_AUTOMATION }}
+      CLOUD_RUN_CLEANUP_ENABLED: ${{ vars.CLOUD_RUN_CLEANUP_ENABLED }}
       WORKFLOW_TARGET: ${{ inputs.target || 'configured' }}
       INPUT_CLOUD_RUN_REGION: ${{ inputs.cloud_run_region }}
       INPUT_CLOUD_RUN_SERVICE: ${{ inputs.cloud_run_service }}
@@ -283,21 +284,21 @@ jobs:
             echo "CLOUD_RUN_ENV_SYNC_WAIT_FOR_COMMIT=false" >> "$GITHUB_ENV"
           fi
 
-      - name: Set up Python for strategy requirement resolution
-        if: steps.config.outputs.env_sync_enabled == 'true'
+      - name: Set up Python for runtime target admission
+        if: steps.config.outputs.enabled == 'true'
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install strategy status dependencies
-        if: steps.config.outputs.env_sync_enabled == 'true'
+        if: steps.config.outputs.enabled == 'true'
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip uv
           uv sync --frozen --no-dev
-      - name: Resolve Cloud Run sync targets
+      - name: Resolve admissible Cloud Run targets
         id: strategy_requirements
-        if: steps.config.outputs.env_sync_enabled == 'true'
+        if: steps.config.outputs.enabled == 'true'
         run: |
           set -euo pipefail
           sync_plan_json="$(uv run --no-sync python scripts/build_cloud_run_env_sync_plan.py --json)"
@@ -351,6 +352,7 @@ jobs:
           fi
 
       - name: Validate deploy inputs
+        if: steps.config.outputs.deploy_enabled == 'true'
         run: |
           set -euo pipefail
 
@@ -427,7 +429,18 @@ jobs:
             exit 1
           fi
 
+      - name: Verify deployed runtime target admission before traffic shift
+        if: steps.config.outputs.deploy_enabled == 'true'
+        env:
+          SYNC_PLAN_JSON: ${{ steps.strategy_requirements.outputs.sync_plan_json }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync python scripts/verify_deployed_runtime_target_admission.py \
+            --project="${GCP_PROJECT_ID}" \
+            --region="${CLOUD_RUN_REGION}"
+
       - name: Build, push, and deploy Cloud Run image
+        if: steps.config.outputs.deploy_enabled == 'true'
         run: |
           set -euo pipefail
 
@@ -492,7 +505,7 @@ jobs:
           done
 
       - name: Wait for Cloud Run deployment of current commit
-        if: steps.config.outputs.env_sync_enabled == 'true'
+        if: steps.config.outputs.deploy_enabled == 'true' && steps.config.outputs.env_sync_enabled == 'true'
         env:
           SYNC_PLAN_JSON: ${{ steps.strategy_requirements.outputs.sync_plan_json }}
         run: |
@@ -1267,7 +1280,7 @@ jobs:
           done
 
       - name: Prune old Cloud Run revisions
-        if: steps.config.outputs.enabled == 'true'
+        if: steps.config.outputs.deploy_enabled == 'true' && env.CLOUD_RUN_CLEANUP_ENABLED == 'true'
         env:
           SYNC_PLAN_JSON: ${{ steps.strategy_requirements.outputs.sync_plan_json }}
         run: |
@@ -1356,6 +1369,7 @@ jobs:
           done
 
       - name: Clean up old Cloud Run images
+        if: steps.config.outputs.deploy_enabled == 'true' && env.CLOUD_RUN_CLEANUP_ENABLED == 'true'
         run: |
           set -euo pipefail
 

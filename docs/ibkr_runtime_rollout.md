@@ -285,8 +285,10 @@ gcloud storage buckets add-iam-policy-binding "gs://run-sources-${PROJECT_ID}-${
    - `IB_ACCOUNT_GROUP_CONFIG_SECRET_NAME=ibkr-account-groups`
    - 其他服务级变量按上面补齐
 
-5. **触发 env sync**
-   - push 到 `main`，或手动跑一次同等的 `gcloud run services update`
+5. **通过受保护的部署 workflow 触发同步或镜像发布**
+   - 标准路径是 `Deploy Cloud Run` workflow；它会在流量切换前验证已部署目标与待发布策略均仍在准入目录。
+   - 不要把临时的 `gcloud run services update --image ...` 当作常规发布方式：它会绕过策略准入、运行身份与 Paper/Shadow/Live 语义校验。
+   - 历史 revision 与镜像默认保留；只有显式设置 `CLOUD_RUN_CLEANUP_ENABLED=true` 才允许自动清理，以保证有可回滚版本。
 
 6. **检查 Cloud Run 当前 env**
 
