@@ -156,7 +156,14 @@ class IBKRRuntimeBrokerAdapters:
             ib.RaiseRequestErrors = original_raise_request_errors
             ib.RequestTimeout = original_request_timeout
 
-    def connect_ib(self):
+    def connect_ib(self, *, validate_trading_permissions: bool = True):
+        """Connect to the Gateway, optionally without an order-write permission probe.
+
+        Account validation is safe and remains mandatory for every connection.
+        The live trading permission check uses IBKR's ``whatIfOrder`` API, which
+        is non-transmitting but still exercises an order-validation endpoint.
+        Health and reconciliation probes must not invoke that endpoint.
+        """
         self.ensure_event_loop_fn()
         host = self.host_resolver()
         last_error = None
@@ -179,7 +186,8 @@ class IBKRRuntimeBrokerAdapters:
                 )
                 try:
                     self.validate_configured_accounts(ib)
-                    self.validate_trading_permissions(ib)
+                    if validate_trading_permissions:
+                        self.validate_trading_permissions(ib)
                 except Exception:
                     disconnect_fn = getattr(ib, "disconnect", None)
                     if callable(disconnect_fn):

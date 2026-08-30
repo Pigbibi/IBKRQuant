@@ -528,7 +528,7 @@ def test_local_precheck_defers_worker_recycle_to_monitor_dispatch(strategy_modul
 
 
 def test_handle_probe_checks_account_snapshot_without_success_notification(strategy_module, monkeypatch):
-    observed = {"events": [], "disconnects": 0, "notifications": []}
+    observed = {"events": [], "disconnects": 0, "notifications": [], "connection_options": []}
 
     class FakeIB:
         def disconnect(self):
@@ -562,7 +562,11 @@ def test_handle_probe_checks_account_snapshot_without_success_notification(strat
         "attach_strategy_plugin_report",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("health probe should not attach strategy plugin reports")),
     )
-    monkeypatch.setattr(strategy_module, "connect_ib", lambda: FakeIB())
+    def fake_connect_ib(*, validate_trading_permissions=True):
+        observed["connection_options"].append(validate_trading_permissions)
+        return FakeIB()
+
+    monkeypatch.setattr(strategy_module, "connect_ib", fake_connect_ib)
     monkeypatch.setattr(strategy_module, "build_portfolio_snapshot", lambda ib: snapshot)
     monkeypatch.setattr(
         strategy_module,
@@ -585,6 +589,7 @@ def test_handle_probe_checks_account_snapshot_without_success_notification(strat
     assert observed["report"]["summary"]["positions_count"] == 1
     assert observed["disconnects"] == 1
     assert observed["notifications"] == []
+    assert observed["connection_options"] == [False]
 
 
 def test_handle_probe_connect_timeout_sends_concise_connection_notification(strategy_module, monkeypatch):
