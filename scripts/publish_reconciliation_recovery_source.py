@@ -34,6 +34,7 @@ from quant_platform_kit.common.reconciliation_recovery import (
 
 
 RECONCILIATION_RECOVERY_SYNC_TOKEN_ENV = "RECONCILIATION_RECOVERY_SYNC_TOKEN"
+RECONCILIATION_RECOVERY_PRIVATE_EVIDENCE_SCHEMA_VERSION = "ibkr_reconciliation_recovery_private_evidence.v1"
 _SHA256_LENGTH = 64
 
 
@@ -165,6 +166,87 @@ def build_recovery_source_snapshot(
     ).to_dict()
 
 
+def _parse_private_evidence_uri(value: str) -> tuple[str, str]:
+    """Allow only an explicit, immutable IBKR source-artifact object path."""
+
+    normalized = str(value or "").strip()
+    if not normalized.startswith("gs://"):
+        raise ValueError("private_evidence_uri must use gs://")
+    remainder = normalized.removeprefix("gs://")
+    bucket_name, separator, object_name = remainder.partition("/")
+    required_prefix = "reconciliation-recovery/ibkr/source/"
+    if not bucket_name or not separator or not object_name.startswith(required_prefix) or object_name.endswith("/"):
+        raise ValueError("private_evidence_uri must use the IBKR recovery source prefix")
+    return bucket_name, object_name
+
+
+def build_private_evidence_package(
+    *,
+    snapshot: Mapping[str, object],
+    candidate_payload: Mapping[str, Any],
+    dual_review_payload: Mapping[str, Any],
+) -> dict[str, object]:
+    """Package private inputs for the later verifier, never for QRS ingress."""
+
+    candidate = extract_baseline_candidate(candidate_payload)
+    extract_bound_dual_review(dual_review_payload, candidate=candidate)
+    recoveries = snapshot.get("recoveries")
+    if not isinstance(recoveries, list) or len(recoveries) != 1 or not isinstance(recoveries[0], Mapping):
+        raise ValueError("recovery source snapshot must contain exactly one recovery")
+    recovery_id = str(recoveries[0].get("recovery_id") or "").strip()
+    if not recovery_id:
+        raise ValueError("recovery source snapshot is missing recovery_id")
+    return {
+        "schema_version": RECONCILIATION_RECOVERY_PRIVATE_EVIDENCE_SCHEMA_VERSION,
+        "recovery_id": recovery_id,
+        "candidate_sha256": candidate.candidate_sha256,
+        "source_snapshot": dict(snapshot),
+        "baseline_candidate": dict(candidate_payload),
+        "dual_review": dict(dual_review_payload),
+    }
+
+
+def archive_private_evidence_package(
+    package: Mapping[str, object],
+    *,
+    private_evidence_uri: str,
+    storage_client_factory: Any | None = None,
+) -> dict[str, str]:
+    """Create one immutable private package with a GCS generation precondition.
+
+    The publisher role has create-only access to this prefix. A pre-existing
+    artifact therefore fails instead of being replaced, and this helper never
+    lists, reads, deletes, or rewrites an object.
+    """
+
+    bucket_name, object_name = _parse_private_evidence_uri(private_evidence_uri)
+    if package.get("schema_version") != RECONCILIATION_RECOVERY_PRIVATE_EVIDENCE_SCHEMA_VERSION:
+        raise ValueError("private evidence package has an unsupported schema_version")
+    payload = json.dumps(dict(package), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if storage_client_factory is None:
+        try:
+            from google.cloud import storage
+        except ImportError as exc:  # pragma: no cover - production dependency is installed in runtime images.
+            raise RuntimeError("google-cloud-storage is required to archive private recovery evidence") from exc
+        client = storage.Client()
+    else:
+        client = storage_client_factory()
+    blob = client.bucket(bucket_name).blob(object_name)
+    try:
+        blob.upload_from_string(
+            payload,
+            content_type="application/json",
+            if_generation_match=0,
+        )
+    except Exception as exc:
+        raise RuntimeError("private recovery evidence archive was not created") from exc
+    return {
+        "uri": f"gs://{bucket_name}/{object_name}",
+        "schema_version": RECONCILIATION_RECOVERY_PRIVATE_EVIDENCE_SCHEMA_VERSION,
+        "candidate_sha256": str(package["candidate_sha256"]),
+    }
+
+
 def publish_recovery_source_snapshot(
     snapshot: Mapping[str, object],
     *,
@@ -252,6 +334,10 @@ def main(argv: list[str] | None = None) -> int:
         "--publish-url",
         help="Explicit QRS /api/internal/sync-reconciliation-recovery-source HTTPS URL; omitted means no network call",
     )
+    parser.add_argument(
+        "--archive-gcs-uri",
+        help="Explicit private gs://.../reconciliation-recovery/ibkr/source/... object; uses create-only generation precondition",
+    )
     args = parser.parse_args(argv)
     try:
         snapshot = build_recovery_source_snapshot(
@@ -261,13 +347,25 @@ def main(argv: list[str] | None = None) -> int:
             source_id=args.source_id,
             now=_parse_time(args.now),
         )
+        output: dict[str, object] = {"snapshot": snapshot}
+        if args.archive_gcs_uri:
+            output["private_evidence_archive"] = archive_private_evidence_package(
+                build_private_evidence_package(
+                    snapshot=snapshot,
+                    candidate_payload=_load_json(args.candidate, label="baseline candidate"),
+                    dual_review_payload=_load_json(args.dual_review, label="dual review"),
+                ),
+                private_evidence_uri=args.archive_gcs_uri,
+            )
         if args.publish_url:
             result = publish_recovery_source_snapshot(
                 snapshot,
                 publish_url=args.publish_url,
                 token=os.environ.get(RECONCILIATION_RECOVERY_SYNC_TOKEN_ENV, ""),
             )
-            print(json.dumps({"snapshot": snapshot, "publish": result}, ensure_ascii=False, sort_keys=True))
+            output["publish"] = result
+        if args.publish_url or args.archive_gcs_uri:
+            print(json.dumps(output, ensure_ascii=False, sort_keys=True))
         else:
             print(json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
     except (ValueError, RuntimeError) as exc:

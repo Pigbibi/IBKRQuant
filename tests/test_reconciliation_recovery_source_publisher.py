@@ -9,6 +9,8 @@ from quant_platform_kit.common.broker_reconciliation_enrollment import (
     evaluate_broker_reconciliation_baseline_enrollment,
 )
 from scripts.publish_reconciliation_recovery_source import (
+    archive_private_evidence_package,
+    build_private_evidence_package,
     build_recovery_source_snapshot,
     publish_recovery_source_snapshot,
 )
@@ -150,3 +152,50 @@ def test_publish_rejects_non_recovery_endpoint() -> None:
             publish_url="https://console.example/api/manual-strategy-switch",
             token="dedicated-token",
         )
+
+
+def test_private_evidence_archive_is_create_only_and_never_uses_console_shape() -> None:
+    start = datetime(2026, 8, 31, 1, 0, tzinfo=timezone.utc)
+    candidate = _candidate_payload(start)
+    candidate_value = candidate["candidate"]
+    assert isinstance(candidate_value, dict)
+    review = _dual_review(str(candidate_value["candidate_sha256"]))
+    snapshot = build_recovery_source_snapshot(
+        candidate_payload=candidate,
+        dual_review_payload=review,
+        recovery_id="ibkr-soxl-live-recovery",
+        now=start + timedelta(minutes=3),
+    )
+    package = build_private_evidence_package(
+        snapshot=snapshot,
+        candidate_payload=candidate,
+        dual_review_payload=review,
+    )
+    observed: dict[str, object] = {}
+
+    class Blob:
+        def upload_from_string(self, value: str, **kwargs: object) -> None:
+            observed["value"] = value
+            observed["kwargs"] = kwargs
+
+    class Bucket:
+        @staticmethod
+        def blob(name: str) -> Blob:
+            observed["object_name"] = name
+            return Blob()
+
+    class Client:
+        @staticmethod
+        def bucket(name: str) -> Bucket:
+            observed["bucket_name"] = name
+            return Bucket()
+
+    result = archive_private_evidence_package(
+        package,
+        private_evidence_uri="gs://private-bucket/reconciliation-recovery/ibkr/source/ibkr-soxl-live-recovery/evidence.json",
+        storage_client_factory=Client,
+    )
+
+    assert result["uri"].startswith("gs://private-bucket/reconciliation-recovery/ibkr/source/")
+    assert observed["kwargs"] == {"content_type": "application/json", "if_generation_match": 0}
+    assert '"baseline_candidate"' in observed["value"]  # type: ignore[operator]
