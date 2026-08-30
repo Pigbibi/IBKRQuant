@@ -180,6 +180,29 @@ def test_verify_only_keeps_plan_closed_when_deployed_target_is_not_reconcile_onl
     assert "reconciliation_recovery_current_state_not_reconcile_only" in result["findings"]
 
 
+def test_verify_only_rejects_a_current_receipt_with_confirmation_second_timestamp() -> None:
+    start = datetime(2026, 8, 31, 1, 0, tzinfo=timezone.utc)
+    candidate = _candidate_payload(start)
+    candidate_value = candidate["candidate"]
+    assert isinstance(candidate_value, dict)
+    candidate_sha256 = str(candidate_value["candidate_sha256"])
+    confirmed_at = start + timedelta(minutes=3)
+
+    result = verify_reconciliation_recovery(
+        candidate_payload=candidate,
+        dual_review_payload=_dual_review(candidate_sha256),
+        confirmation_payload=_console_response(candidate_sha256, confirmed_at=confirmed_at),
+        current_receipt_payload={"evidence": _evidence(observed_at=confirmed_at).to_dict()},
+        runtime_target_payload=_runtime_target(),
+        recovery_id="ibkr-soxl-live-recovery",
+        now=start + timedelta(minutes=5),
+    )
+
+    assert result["ready_for_atomic_state_transition"] is False
+    assert result["transition_plan"] is None
+    assert "reconciliation_recovery_evidence_not_reobserved_after_confirmation" in result["findings"]
+
+
 def test_read_console_confirmation_uses_dedicated_bearer_header() -> None:
     received: dict[str, object] = {}
 
