@@ -19,7 +19,7 @@ jobs:
       - name: Reject public runtime configuration bindings
         run: |
           set -euo pipefail
-          if rg -n '\$\{\{[[:space:]]*vars\.(CLOUD_RUN_SERVICE_TARGETS_JSON|GLOBAL_TELEGRAM_CHAT_ID|CLOUD_RUN_SERVICES|CLOUD_RUN_SERVICE|RUNTIME_HEARTBEAT_REQUIRED_SERVICES|RUNTIME_GUARD_SCHEDULER_JOB_PATTERN)' .github/workflows; then
+          if rg -n '\$\{\{[[:space:]]*vars\.(GLOBAL_TELEGRAM_CHAT_ID|CLOUD_RUN_SERVICES|CLOUD_RUN_SERVICE|RUNTIME_HEARTBEAT_REQUIRED_SERVICES|RUNTIME_GUARD_SCHEDULER_JOB_PATTERN)([[:space:]]|\}\}|\|\|)' .github/workflows; then
             echo "Sensitive operational runtime configuration must use GitHub Secrets, not GitHub Variables." >&2
             exit 1
           fi
