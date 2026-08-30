@@ -173,6 +173,31 @@ def _frozen_runtime_target():
     )
 
 
+def _frozen_runtime_target_from_minimal_json():
+    """Mirror a valid legacy target JSON that omits derived execution fields."""
+
+    payload = {
+        "platform_id": "ibkr",
+        "strategy_profile": "soxl_soxx_trend_income",
+        "dry_run_only": False,
+        "deployment_selector": "live",
+        "account_selector": ["group"],
+        "account_scope": "live",
+        "service_name": "ibkr-live",
+    }
+    return build_runtime_target(
+        **payload,
+        live_continuity={
+            "state": "RECONCILE_ONLY",
+            "baseline_kind": "legacy_authorized",
+            "baseline_id": "ibkr-soxl-lkg-20260830",
+            "baseline_target_sha256": runtime_target_fingerprint(payload),
+            "captured_at": "2026-08-30",
+        },
+        continuity_fingerprint_payload=payload,
+    )
+
+
 def _observations() -> IBKRReconciliationObservations:
     return IBKRReconciliationObservations(
         account_scope={"account_ids": ["U123"]},
@@ -208,6 +233,25 @@ def test_candidate_stays_frozen_without_private_expected_digests(tmp_path) -> No
         "evidence",
     }
     assert candidate.to_safe_dict()["evidence"]["positions_sha256"]
+
+
+def test_candidate_accepts_startup_validated_legacy_json_baseline(tmp_path) -> None:
+    candidate = build_reconciliation_candidate(
+        observations=_observations(),
+        runtime_target=_frozen_runtime_target_from_minimal_json(),
+        platform_id="ibkr",
+        strategy_profile="soxl_soxx_trend_income",
+        account_group="LIVE",
+        project_id=None,
+        env_reader=lambda name, default=None: (
+            str(tmp_path) if name == "IBKR_EXECUTION_STATE_DIR" else default
+        ),
+    )
+
+    assert "broker_reconciliation_baseline_target_mismatch" not in {
+        finding.value for finding in candidate.recovery_blockers
+    }
+    assert candidate.permits_active_lkg is False
 
 
 def test_candidate_can_only_pass_with_all_matching_private_digests(tmp_path) -> None:
