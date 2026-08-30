@@ -665,7 +665,20 @@ def _resolve_runtime_target(
     env: Mapping[str, str],
     per_service_mode: bool,
 ) -> dict[str, object]:
-    raw = _first_non_empty(
+    configured_service = str(_first_non_empty(
+        _target_field(target, defaults, "service"),
+        _target_field(target, defaults, "service_name"),
+        _target_field(target, defaults, "cloud_run_service"),
+    ) or "").strip()
+    current_service = str(env.get("CLOUD_RUN_SERVICE", "") or "").strip()
+    environment_target = str(env.get("RUNTIME_TARGET_JSON", "") or "").strip()
+
+    # An environment-scoped switch is the desired state for its exact service.
+    # It must not be silently replaced by a legacy repository service inventory;
+    # sibling services continue to use their own inventory entries.
+    raw = environment_target if (
+        per_service_mode and environment_target and configured_service == current_service
+    ) else _first_non_empty(
         _target_field(target, defaults, "runtime_target"),
         _target_field(target, defaults, "runtime_target_json"),
     )
