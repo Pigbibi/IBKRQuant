@@ -32,6 +32,11 @@ AIAuditBridge 的完整 `reconciliation_baseline` 输出。它会同时核验：
 券商、复核双审绑定，并以原子比较并设置方式转换状态；任一失败都保持
 `RECONCILE_ONLY`。
 
+来源发布器还可在显式给出
+`gs://.../reconciliation-recovery/ibkr/source/...` 时，把完整候选与双审回执写入
+私有证据包。该包不发送给 QRS；写入固定使用 GCS `if_generation_match=0`，所以已存在
+对象会失败而不会被覆盖、读取或删除。验证器只能在专用私有存储中读取它。
+
 ## 私有验证器（暂不写状态）
 
 `scripts/verify_reconciliation_recovery.py` 是恢复链路的第二层。它使用一枚不同于
