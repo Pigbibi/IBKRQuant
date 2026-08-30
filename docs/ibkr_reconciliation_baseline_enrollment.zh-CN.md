@@ -51,6 +51,28 @@ AIAuditBridge 的完整 `reconciliation_baseline` 输出。它会同时核验：
 券商、执行标记或订单写入代码。下一层单独的最小权限控制器才可消费该计划，并且仍要
 在同一目标上比较五项摘要后执行一次精确 CAS。
 
+## 只读状态账本适配层（默认关闭）
+
+为避免把一段旧的 `RUNTIME_TARGET_JSON` 直接写回 GitHub 变量，部署链路可选择读取一份
+私有、不可覆盖的状态账本。账本的结构固定为
+`ibkr_reconciliation_recovery_state_ledger.v1`，且只含四项：`recovery_id`、
+`service_name` 和上述完整 QPK `transition_plan`（另加版本）。它**不**携带下一个运行
+目标、账户、策略、仓位、订单或执行权限。
+
+消费时系统从当前完整运行目标推导结果，并逐项验证：服务必须唯一匹配、平台必须为
+IBKR、当前状态必须仍是 `RECONCILE_ONLY`、基线 ID 与目标指纹必须等于计划的冻结值，且
+QPK 计划中的五项摘要、`no_order=true`、`execution_authority_granted=false` 和 CAS 标志
+必须完整存在。验证成功后，唯一允许的差异是
+`live_continuity.state: RECONCILE_ONLY -> ACTIVE_LKG`；五项摘要以
+`IBKR_RECONCILIATION_EXPECTED_DIGESTS_JSON` 注入运行环境。任何字段缺失、账本重放、目标
+漂移、服务不匹配或多服务误匹配都会失败关闭。
+
+工作流只有在仓库变量 `IBKR_RECONCILIATION_RECOVERY_STATE_LEDGER_URI` 显式非空时才会读取
+账本；URI 还必须落在专用私有桶的
+`reconciliation-recovery/ibkr/state/*.json` 前缀。未设置时不下载账本、不改变同步计划，
+既有实盘目标也不受影响。本阶段不写入该变量，也不创建账本对象；因此它只是经过测试的
+兼容入口，而不是一次自动或隐式的实盘恢复。
+
 ## 故障注入回归
 
 恢复链路的回归测试会主动注入：控制台把不可执行策略篡改为可执行、五项摘要之一

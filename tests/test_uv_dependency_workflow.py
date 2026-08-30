@@ -24,6 +24,9 @@ def test_ci_docker_and_env_sync_use_uv_lock() -> None:
     assert "uv run --no-sync python external/QuantPlatformKit/scripts/check_qpk_pin_consistency.py" in ci
     assert "uv sync --frozen --no-dev" in env_sync
     assert "uv run --no-sync python scripts/build_cloud_run_env_sync_plan.py --json" in env_sync
+    assert "IBKR_RECONCILIATION_RECOVERY_STATE_LEDGER_URI" in env_sync
+    assert "Fetch opt-in immutable recovery state ledger" in env_sync
+    assert "gcloud storage cp --quiet" in env_sync
     assert "COPY . ." in dockerfile
     assert dockerfile.index("COPY . .") < dockerfile.index("uv sync --frozen --no-dev")
     assert "uv sync --frozen --no-dev" in dockerfile
