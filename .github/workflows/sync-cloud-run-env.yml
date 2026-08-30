@@ -87,7 +87,9 @@ jobs:
       CLOUD_SCHEDULER_PROBE_TIME: ${{ vars.CLOUD_SCHEDULER_PROBE_TIME }}
       CLOUD_SCHEDULER_PRECHECK_TIME: ${{ vars.CLOUD_SCHEDULER_PRECHECK_TIME }}
       TELEGRAM_TOKEN_SECRET_NAME: ${{ vars.TELEGRAM_TOKEN_SECRET_NAME }}
-      RUNTIME_TARGET_JSON: ${{ secrets.RUNTIME_TARGET_JSON }}
+      # This is validated deployment intent, not credential material. Prefer the
+      # control-plane variable while retaining a legacy-secret fallback during migration.
+      RUNTIME_TARGET_JSON: ${{ vars.RUNTIME_TARGET_JSON || secrets.RUNTIME_TARGET_JSON }}
       ACCOUNT_GROUP: ${{ vars.ACCOUNT_GROUP }}
       IB_ACCOUNT_GROUP_CONFIG_SECRET_NAME: ${{ vars.IB_ACCOUNT_GROUP_CONFIG_SECRET_NAME }}
       IBKR_FEATURE_SNAPSHOT_PATH: ${{ vars.IBKR_FEATURE_SNAPSHOT_PATH }}
