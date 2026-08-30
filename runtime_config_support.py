@@ -26,6 +26,7 @@ from quant_platform_kit.common.runtime_target import (
     RuntimeTarget,
     resolve_runtime_target_from_env,
 )
+from quant_platform_kit.common.live_continuity import runtime_target_permits_standard_execution
 try:
     from quant_platform_kit.common.broker_costs import (
         BrokerCostProfile,
@@ -403,7 +404,10 @@ def load_platform_runtime_settings(
                 os.getenv("FEATURE_SNAPSHOT_FALLBACK_MAX_STALE_DAYS"),
             )
         ),
-        runtime_target_enabled=resolve_runtime_target_enabled_env(),
+        runtime_target_enabled=(
+            resolve_runtime_target_enabled_env()
+            and runtime_target_permits_standard_execution(runtime_target)
+        ),
         market=market,
         market_calendar=first_non_empty(
             os.getenv("IBKR_MARKET_CALENDAR"),

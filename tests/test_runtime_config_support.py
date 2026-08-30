@@ -306,6 +306,35 @@ def test_runtime_target_enabled_loads_from_env(monkeypatch):
     assert settings.runtime_target_enabled is False
 
 
+def test_live_continuity_paused_state_disables_standard_execution(monkeypatch):
+    runtime_target = {
+        "platform_id": "ibkr",
+        "strategy_profile": SAMPLE_STRATEGY_PROFILE,
+        "dry_run_only": False,
+        "execution_mode": "live",
+        "deployment_selector": "default",
+        "account_scope": "default",
+        "live_continuity": {
+            "state": "PAUSED",
+            "baseline_kind": "legacy_authorized",
+            "baseline_id": "soxl-ibkr-lkg-20260830",
+            "baseline_target_sha256": "a" * 64,
+            "captured_at": "2026-08-30",
+        },
+    }
+    from quant_platform_kit.common.live_continuity import runtime_target_fingerprint
+
+    runtime_target["live_continuity"]["baseline_target_sha256"] = runtime_target_fingerprint(runtime_target)
+    monkeypatch.setenv("RUNTIME_TARGET_JSON", json.dumps(runtime_target))
+    monkeypatch.setenv("ACCOUNT_GROUP", "paper")
+    monkeypatch.setenv("IB_ACCOUNT_GROUP_CONFIG_JSON", MINIMAL_GROUP_JSON)
+    monkeypatch.setenv("RUNTIME_TARGET_ENABLED", "true")
+
+    settings = load_platform_runtime_settings(project_id_resolver=lambda: "project-1")
+
+    assert settings.runtime_target_enabled is False
+
+
 def test_invalid_runtime_target_enabled_is_rejected(monkeypatch):
     monkeypatch.setenv("RUNTIME_TARGET_JSON", runtime_target_json(SAMPLE_STRATEGY_PROFILE))
     monkeypatch.setenv("ACCOUNT_GROUP", "paper")
