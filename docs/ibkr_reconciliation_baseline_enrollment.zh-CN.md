@@ -31,3 +31,17 @@ AIAuditBridge 的完整 `reconciliation_baseline` 输出。它会同时核验：
 该写入仅供人工确认队列使用，不能恢复 `ACTIVE_LKG`。后续私有控制器仍须重新读取
 券商、复核双审绑定，并以原子比较并设置方式转换状态；任一失败都保持
 `RECONCILE_ONLY`。
+
+## 私有验证器（暂不写状态）
+
+`scripts/verify_reconciliation_recovery.py` 是恢复链路的第二层。它使用一枚不同于
+来源发布令牌的 `RECONCILIATION_RECOVERY_CONTROLLER_TOKEN`，从 QRS 只读取得已确认
+条目；然后重新解析本地私有候选与完整双审回执，读取一份**确认之后**新生成的
+`/reconcile` 回执，并核对已部署 `RUNTIME_TARGET_JSON` 仍为同一
+`RECONCILE_ONLY` 基线。
+
+该验证器只输出 `ibkr_reconciliation_recovery_verification.v1` 和可能的 QPK 原子切换
+计划。即使验证通过，输出也固定 `controller_mode=verify_only`、`no_order=true`、
+`execution_authority_granted=false`、`state_write_attempted=false`；它没有 Cloud Run、
+券商、执行标记或订单写入代码。下一层单独的最小权限控制器才可消费该计划，并且仍要
+在同一目标上比较五项摘要后执行一次精确 CAS。
