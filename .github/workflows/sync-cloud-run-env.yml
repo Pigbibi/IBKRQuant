@@ -167,6 +167,9 @@ jobs:
       STRATEGY_PLUGIN_ALERT_TELEGRAM_BODY_MAX_CHARS: ${{ vars.STRATEGY_PLUGIN_ALERT_TELEGRAM_BODY_MAX_CHARS }}
       # Strategy-owned defaults continue to come from UsEquityStrategies; this workflow only syncs platform/runtime inputs.
       EXECUTION_REPORT_GCS_URI: ${{ vars.EXECUTION_REPORT_GCS_URI }}
+      # Empty by default. When explicitly set, the workflow downloads one
+      # immutable, private recovery ledger before deriving its sync plan.
+      IBKR_RECONCILIATION_RECOVERY_STATE_LEDGER_URI: ${{ vars.IBKR_RECONCILIATION_RECOVERY_STATE_LEDGER_URI }}
       GLOBAL_TELEGRAM_CHAT_ID: ${{ secrets.GLOBAL_TELEGRAM_CHAT_ID }}
       NOTIFY_LANG: ${{ vars.NOTIFY_LANG }}
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -294,6 +297,39 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Authenticate to Google Cloud
+        id: auth
+        if: steps.config.outputs.enabled == 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        if: steps.config.outputs.enabled == 'true'
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          version: ">= 416.0.0"
+
+      - name: Fetch opt-in immutable recovery state ledger
+        if: steps.config.outputs.enabled == 'true' && env.IBKR_RECONCILIATION_RECOVERY_STATE_LEDGER_URI != ''
+        env:
+          RECOVERY_STATE_LEDGER_URI: ${{ env.IBKR_RECONCILIATION_RECOVERY_STATE_LEDGER_URI }}
+        run: |
+          set -euo pipefail
+          case "${RECOVERY_STATE_LEDGER_URI}" in
+            gs://qsl-reconciliation-recovery-private-ibkr/reconciliation-recovery/ibkr/state/*.json) ;;
+            *)
+              echo "Recovery state ledger URI must use the dedicated private immutable prefix." >&2
+              exit 1
+              ;;
+          esac
+          recovery_state_ledger_path="${RUNNER_TEMP}/ibkr-reconciliation-recovery-state-ledger.json"
+          gcloud storage cp --quiet "${RECOVERY_STATE_LEDGER_URI}" "${recovery_state_ledger_path}" >/dev/null
+          chmod 600 "${recovery_state_ledger_path}"
+          echo "IBKR_RECONCILIATION_RECOVERY_STATE_LEDGER_PATH=${recovery_state_ledger_path}" >> "$GITHUB_ENV"
+
       - name: Install strategy status dependencies
         if: steps.config.outputs.enabled == 'true'
         run: |
@@ -405,21 +441,6 @@ jobs:
             echo "Cloud Run deploy is enabled, but no services were found in CLOUD_RUN_SERVICE_TARGETS_JSON, CLOUD_RUN_SERVICES, or CLOUD_RUN_SERVICE." >&2
             exit 1
           fi
-
-      - name: Authenticate to Google Cloud
-        id: auth
-        if: steps.config.outputs.enabled == 'true'
-        uses: google-github-actions/auth@v3
-        with:
-          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT }}
-
-      - name: Set up gcloud
-        if: steps.config.outputs.enabled == 'true'
-        uses: google-github-actions/setup-gcloud@v3
-        with:
-          project_id: ${{ env.GCP_PROJECT_ID }}
-          version: ">= 416.0.0"
 
       - name: Require configured scheduler migration before HK verify
         if: steps.config.outputs.env_sync_enabled == 'true' && env.WORKFLOW_TARGET == 'hk-verify'

@@ -57,6 +57,9 @@ from runtime_config_support import (  # noqa: E402
     DEFAULT_MARKET_TIMEZONE,
     resolve_market,
 )
+from scripts.reconciliation_recovery_state_ledger import (  # noqa: E402
+    apply_recovery_state_ledger_from_env,
+)
 
 
 TARGETS_JSON_ENV = "CLOUD_RUN_SERVICE_TARGETS_JSON"
@@ -103,6 +106,7 @@ PLATFORM_GENERIC_ENV = (
     "IBKR_STRATEGY_CONFIG_PATH",
     "IBKR_STRATEGY_PLUGIN_MOUNTS_JSON",
     "IBKR_RECONCILIATION_OUTPUT_PATH",
+    "IBKR_RECONCILIATION_EXPECTED_DIGESTS_JSON",
     "IBKR_DRY_RUN_ONLY",
     "IBKR_EXECUTION_DEDUP_ENABLED",
     "IBKR_PAPER_LIQUIDATE_ONLY",
@@ -329,8 +333,10 @@ def build_sync_plan(env: Mapping[str, str] = os.environ) -> dict[str, object]:
         }
         for row in get_platform_profile_status_matrix()
     }
-    planned_targets = [
-        _build_target_plan(
+    planned_targets = []
+    recovery_ledger_applied_count = 0
+    for target in target_entries:
+        planned_target = _build_target_plan(
             target=target,
             defaults=defaults,
             env=env,
@@ -338,8 +344,11 @@ def build_sync_plan(env: Mapping[str, str] = os.environ) -> dict[str, object]:
             per_service_mode=per_service_mode,
             platform_config=platform_config,
         )
-        for target in target_entries
-    ]
+        if planned_target.pop("_recovery_state_ledger_applied", False):
+            recovery_ledger_applied_count += 1
+        planned_targets.append(planned_target)
+    if str(env.get("IBKR_RECONCILIATION_RECOVERY_STATE_LEDGER_PATH") or "").strip() and recovery_ledger_applied_count != 1:
+        raise ValueError("reconciliation recovery state ledger must match exactly one Cloud Run target")
     if not planned_targets:
         raise ValueError(
             f"{TARGETS_JSON_ENV}, CLOUD_RUN_SERVICES, or CLOUD_RUN_SERVICE is required"
@@ -394,6 +403,10 @@ def _build_target_plan(
         _target_field(target, defaults, "cloud_run_service"),
     )
     runtime_target = _resolve_runtime_target(target, defaults, env, per_service_mode)
+    runtime_target, recovery_expected_digests = apply_recovery_state_ledger_from_env(
+        runtime_target=runtime_target,
+        env=env,
+    )
     if not service_name:
         service_name = str(runtime_target.get("service_name") or "").strip()
     if not service_name:
@@ -516,6 +529,18 @@ def _build_target_plan(
         else:
             env_values[name] = value
 
+    if recovery_expected_digests is not None:
+        # An immutable ledger is the only source permitted to activate the
+        # frozen baseline, so it deliberately overrides every normal config
+        # layer for the accompanying five reconciliation digests.
+        env_values["IBKR_RECONCILIATION_EXPECTED_DIGESTS_JSON"] = json.dumps(
+            recovery_expected_digests,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if "IBKR_RECONCILIATION_EXPECTED_DIGESTS_JSON" in remove_env_vars:
+            remove_env_vars.remove("IBKR_RECONCILIATION_EXPECTED_DIGESTS_JSON")
+
     if _runtime_target_enabled(env_values):
         _validate_profile_inputs(
             service_name=service_name,
@@ -553,6 +578,7 @@ def _build_target_plan(
         "env": env_values,
         "scheduler": scheduler,
         "remove_env_vars": sorted(set(remove_env_vars) - set(env_values)),
+        "_recovery_state_ledger_applied": recovery_expected_digests is not None,
     }
 
 

@@ -20,6 +20,11 @@ grep -Fq 'service_account: ${{ env.GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT }}' "$w
 grep -Fq 'uses: actions/checkout@v6' "$workflow_file"
 grep -Fq 'uses: actions/setup-python@v6' "$workflow_file"
 grep -Fq 'uv sync --frozen --no-dev' "$workflow_file"
+grep -Fq 'IBKR_RECONCILIATION_RECOVERY_STATE_LEDGER_URI: ${{ vars.IBKR_RECONCILIATION_RECOVERY_STATE_LEDGER_URI }}' "$workflow_file"
+grep -Fq 'Fetch opt-in immutable recovery state ledger' "$workflow_file"
+grep -Fq 'gs://qsl-reconciliation-recovery-private-ibkr/reconciliation-recovery/ibkr/state/*.json' "$workflow_file"
+grep -Fq 'gcloud storage cp --quiet "${RECOVERY_STATE_LEDGER_URI}" "${recovery_state_ledger_path}" >/dev/null' "$workflow_file"
+grep -Fq 'echo "IBKR_RECONCILIATION_RECOVERY_STATE_LEDGER_PATH=${recovery_state_ledger_path}" >> "$GITHUB_ENV"' "$workflow_file"
 
 grep -Fq 'ENABLE_MAIN_PUSH_CLOUD_RUN_AUTOMATION: ${{ vars.ENABLE_MAIN_PUSH_CLOUD_RUN_AUTOMATION }}' "$workflow_file"
 grep -Fq 'target:' "$workflow_file"
