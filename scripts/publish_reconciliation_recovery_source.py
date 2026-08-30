@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Build or explicitly publish a redacted IBKR legacy-recovery source snapshot.
+
+This bridge consumes a private QPK baseline candidate and the private result
+of AIAuditBridge's mandatory ``reconciliation_baseline`` review. By default it
+only prints the minimal console snapshot. It never opens an IBKR session,
+changes a runtime target, writes an execution marker, or submits an order.
+
+``--publish-url`` is opt-in and sends only that minimal snapshot to QRS using
+its dedicated bearer token. The ingress records an operator-facing recovery
+intent; it is not a broker or execution endpoint.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from collections.abc import Mapping
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from quant_platform_kit.common.broker_reconciliation_enrollment import (
+    BrokerReconciliationBaselineCandidate,
+)
+from quant_platform_kit.common.reconciliation_recovery import (
+    ReconciliationRecoveryDualReview,
+    ReconciliationRecoverySourceSnapshot,
+    build_reconciliation_recovery_record,
+)
+
+
+RECONCILIATION_RECOVERY_SYNC_TOKEN_ENV = "RECONCILIATION_RECOVERY_SYNC_TOKEN"
+_SHA256_LENGTH = 64
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    """Never forward the dedicated source token to an HTTP redirect target."""
+
+    def redirect_request(self, request: Request, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
+def _load_json(path: Path, *, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"unable to read {label}: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label} is not valid JSON: {path}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return value
+
+
+def _sha256(value: object, *, field_name: str) -> str:
+    normalized = str(value or "").strip().lower().removeprefix("sha256:")
+    if len(normalized) != _SHA256_LENGTH or any(character not in "0123456789abcdef" for character in normalized):
+        raise ValueError(f"{field_name} must be a SHA-256 digest")
+    return normalized
+
+
+def extract_baseline_candidate(payload: Mapping[str, Any]) -> BrokerReconciliationBaselineCandidate:
+    """Load only a ready, QPK-validated candidate from the local receipt tool."""
+
+    if payload.get("schema_version") != "ibkr_reconciliation_baseline_enrollment.v1":
+        raise ValueError("baseline candidate has an unsupported schema_version")
+    if payload.get("ready_for_independent_review") is not True:
+        raise ValueError("baseline candidate is not ready for independent review")
+    candidate = payload.get("candidate")
+    if not isinstance(candidate, Mapping):
+        raise ValueError("baseline candidate is missing its QPK candidate")
+    return BrokerReconciliationBaselineCandidate.from_dict(candidate)
+
+
+def _secondary_reviewer_count(value: object) -> int:
+    if not isinstance(value, Mapping):
+        return 0
+    # The mandatory trigger currently uses Codex primary plus GPT and Claude.
+    # A legacy independent secondary reviewer still counts as one; primary is
+    # counted separately by extract_bound_dual_review.
+    if all(isinstance(value.get(name), Mapping) for name in ("gpt", "claude")):
+        return 2
+    return 1 if isinstance(value.get("legacy"), Mapping) else 0
+
+
+def extract_bound_dual_review(
+    payload: Mapping[str, Any],
+    *,
+    candidate: BrokerReconciliationBaselineCandidate,
+) -> ReconciliationRecoveryDualReview:
+    """Convert the strict AIAuditBridge receipt to QPK's minimum binding.
+
+    Generic approval JSON is deliberately rejected. The later private
+    controller independently rechecks the full receipt; this output is only a
+    redacted, operator-facing source row.
+    """
+
+    if str(payload.get("trigger") or "").strip() != "reconciliation_baseline":
+        raise ValueError("dual review must use the reconciliation_baseline trigger")
+    if str(payload.get("strategy_profile") or "").strip() != candidate.strategy_profile:
+        raise ValueError("dual review strategy_profile does not match the candidate")
+    if payload.get("escalated") is not True:
+        raise ValueError("dual review did not run the mandatory multi-review path")
+    if payload.get("requires_human_recovery_approval") is not True:
+        raise ValueError("dual review is missing its human recovery approval requirement")
+    authority = payload.get("recovery_authority")
+    if not isinstance(authority, Mapping) or authority.get("human_review_required") is not True:
+        raise ValueError("dual review authority does not require human review")
+    if str(authority.get("final_action") or "").strip().lower() != "escalate":
+        raise ValueError("dual review authority is not restricted to escalation")
+
+    binding = _sha256(payload.get("evidence_binding_sha256"), field_name="dual review evidence_binding_sha256")
+    if binding != candidate.candidate_sha256:
+        raise ValueError("dual review evidence binding does not match the candidate")
+
+    outcome_map = {
+        "pass": "approved", "approve": "approved", "approved": "approved",
+        "fail": "rejected", "reject": "rejected", "rejected": "rejected",
+        "review_unavailable": "unavailable", "unavailable": "unavailable",
+    }
+    outcome = outcome_map.get(str(payload.get("outcome") or "").strip().lower())
+    if outcome is None:
+        raise ValueError("dual review has an unsupported outcome")
+    reviewer_count = int(isinstance(payload.get("primary_review"), Mapping)) + _secondary_reviewer_count(
+        payload.get("secondary_review")
+    )
+    if reviewer_count < 2:
+        raise ValueError("dual review requires a primary and independent secondary reviewer")
+    return ReconciliationRecoveryDualReview(
+        outcome=outcome,
+        reviewer_count=reviewer_count,
+        evidence_binding_sha256=binding,
+    )
+
+
+def build_recovery_source_snapshot(
+    *,
+    candidate_payload: Mapping[str, Any],
+    dual_review_payload: Mapping[str, Any],
+    recovery_id: str,
+    source_id: str = "ibkr.reconciliation_recovery",
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Return the exact QRS ingress payload, without a network side effect."""
+
+    candidate = extract_baseline_candidate(candidate_payload)
+    dual_review = extract_bound_dual_review(dual_review_payload, candidate=candidate)
+    reference_now = now or datetime.now(timezone.utc)
+    record = build_reconciliation_recovery_record(
+        recovery_id=recovery_id,
+        console_platform="ibkr",
+        candidate=candidate,
+        dual_review=dual_review,
+        now=reference_now,
+    )
+    return ReconciliationRecoverySourceSnapshot(
+        source_id=source_id,
+        generated_at=reference_now,
+        computed_at=reference_now,
+        records=(record,),
+    ).to_dict()
+
+
+def publish_recovery_source_snapshot(
+    snapshot: Mapping[str, object],
+    *,
+    publish_url: str,
+    token: str,
+    post: Any | None = None,
+) -> dict[str, object]:
+    """Publish a redacted source snapshot to QRS; never contact a broker."""
+
+    normalized_url = str(publish_url or "").strip()
+    normalized_token = str(token or "").strip()
+    if not normalized_url.startswith("https://"):
+        raise ValueError("publish_url must use https")
+    if not normalized_url.rstrip("/").endswith("/api/internal/sync-reconciliation-recovery-source"):
+        raise ValueError("publish_url must target the reconciliation recovery source ingress")
+    if not normalized_token:
+        raise ValueError(f"{RECONCILIATION_RECOVERY_SYNC_TOKEN_ENV} is required for --publish-url")
+    if post is None:
+        body = json.dumps(dict(snapshot), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        request = Request(
+            normalized_url,
+            data=body,
+            headers={"Authorization": f"Bearer {normalized_token}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with build_opener(_NoRedirect).open(request, timeout=15) as response:  # noqa: S310 - URL is constrained above.
+                status_code = int(response.status)
+                raw_body = response.read().decode("utf-8")
+        except HTTPError as exc:
+            raise RuntimeError(f"reconciliation recovery source publish returned HTTP {exc.code}") from exc
+        except URLError as exc:
+            raise RuntimeError("reconciliation recovery source publish failed") from exc
+        if status_code < 200 or status_code >= 300:
+            raise RuntimeError(f"reconciliation recovery source publish returned HTTP {status_code}")
+        try:
+            result = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("reconciliation recovery source publish returned invalid JSON") from exc
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise RuntimeError("reconciliation recovery source publish was not acknowledged")
+        return result
+    try:
+        response = post(
+            normalized_url,
+            json=dict(snapshot),
+            headers={"Authorization": f"Bearer {normalized_token}"},
+            timeout=15,
+        )
+    except Exception as exc:
+        raise RuntimeError("reconciliation recovery source publish failed") from exc
+    if response.status_code < 200 or response.status_code >= 300:
+        raise RuntimeError(f"reconciliation recovery source publish returned HTTP {response.status_code}")
+    try:
+        result = response.json()
+    except ValueError as exc:
+        raise RuntimeError("reconciliation recovery source publish returned invalid JSON") from exc
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise RuntimeError("reconciliation recovery source publish was not acknowledged")
+    return result
+
+
+def _parse_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("--now must be ISO-8601 with a timezone") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("--now must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Build or explicitly publish a redacted, non-authorising IBKR recovery source snapshot."
+    )
+    parser.add_argument("--candidate", type=Path, required=True, help="Private output from build_reconciliation_baseline_candidate.py")
+    parser.add_argument("--dual-review", type=Path, required=True, help="Private AIAuditBridge reconciliation_baseline result")
+    parser.add_argument("--recovery-id", required=True, help="Opaque legacy runtime recovery identifier")
+    parser.add_argument("--source-id", default="ibkr.reconciliation_recovery")
+    parser.add_argument("--now", help="Optional ISO-8601 time used for deterministic validation")
+    parser.add_argument(
+        "--publish-url",
+        help="Explicit QRS /api/internal/sync-reconciliation-recovery-source HTTPS URL; omitted means no network call",
+    )
+    args = parser.parse_args(argv)
+    try:
+        snapshot = build_recovery_source_snapshot(
+            candidate_payload=_load_json(args.candidate, label="baseline candidate"),
+            dual_review_payload=_load_json(args.dual_review, label="dual review"),
+            recovery_id=args.recovery_id,
+            source_id=args.source_id,
+            now=_parse_time(args.now),
+        )
+        if args.publish_url:
+            result = publish_recovery_source_snapshot(
+                snapshot,
+                publish_url=args.publish_url,
+                token=os.environ.get(RECONCILIATION_RECOVERY_SYNC_TOKEN_ENV, ""),
+            )
+            print(json.dumps({"snapshot": snapshot, "publish": result}, ensure_ascii=False, sort_keys=True))
+        else:
+            print(json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
+    except (ValueError, RuntimeError) as exc:
+        parser.error(str(exc))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
