@@ -1,0 +1,219 @@
+name: Runtime Target Lifecycle
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "42 * * * *"
+
+env:
+  GCP_PROJECT_ID: interactivebrokersquant
+  GCP_WORKLOAD_IDENTITY_PROVIDER: projects/303168642265/locations/global/workloadIdentityPools/github-actions/providers/github-main
+  GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT: ibkr-platform-deploy@interactivebrokersquant.iam.gserviceaccount.com
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  lifecycle:
+    name: Publish ${{ matrix.target.label }} lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - id: soxl_soxx_trend_income
+            label: SOXL/SOXX trend income
+            service: interactive-brokers-quant-live-u15998061-service
+          - id: tqqq_growth_income
+            label: TQQQ growth income
+            service: interactive-brokers-quant-live-u16608560-service
+          - id: global_etf_rotation
+            label: Global ETF rotation
+            service: interactive-brokers-quant-live-u18308207-service
+          - id: russell_top50_leader_rotation
+            label: Russell top-50 leader rotation
+            service: interactive-brokers-quant-live-u18336562-service
+          - id: us_combo_shadow
+            label: US combo shadow
+            service: interactive-brokers-us-combo-shadow-service
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CLOUD_RUN_REGION: us-central1
+      RUNTIME_GUARD_LOOKBACK_MINUTES: ${{ vars.RUNTIME_GUARD_LOOKBACK_MINUTES || '180' }}
+      RUNTIME_GUARD_REQUIRE_SUCCESS: ${{ vars.RUNTIME_GUARD_REQUIRE_SUCCESS || 'false' }}
+      RUNTIME_HEARTBEAT_GCS_URIS: ${{ vars.RUNTIME_HEARTBEAT_GCS_URIS || vars.EXECUTION_REPORT_GCS_URI }}
+      RUNTIME_HEARTBEAT_LOOKBACK_HOURS: ${{ vars.RUNTIME_HEARTBEAT_LOOKBACK_HOURS || '36' }}
+      RUNTIME_HEARTBEAT_ACCEPT_STATUSES: ${{ vars.RUNTIME_HEARTBEAT_ACCEPT_STATUSES }}
+      RUNTIME_HEARTBEAT_REJECT_STATUSES: ${{ vars.RUNTIME_HEARTBEAT_REJECT_STATUSES }}
+      RUNTIME_HEARTBEAT_MARKET_AWARE: ${{ vars.RUNTIME_HEARTBEAT_MARKET_AWARE || 'true' }}
+      RUNTIME_HEARTBEAT_MARKET_CALENDAR: ${{ vars.IBKR_MARKET_CALENDAR }}
+      RUNTIME_HEARTBEAT_MARKET_TIMEZONE: ${{ vars.IBKR_MARKET_TIMEZONE }}
+      RUNTIME_HEARTBEAT_PUBLICATION_GRACE_MINUTES: ${{ vars.RUNTIME_HEARTBEAT_PUBLICATION_GRACE_MINUTES || '30' }}
+      RUNTIME_HEARTBEAT_SCHEDULER_AWARE: ${{ vars.RUNTIME_HEARTBEAT_SCHEDULER_AWARE || 'true' }}
+      RUNTIME_HEARTBEAT_SCHEDULER_LOCATION: ${{ vars.RUNTIME_HEARTBEAT_SCHEDULER_LOCATION || 'us-central1' }}
+      EXECUTION_EVIDENCE_SYNC_URL: ${{ vars.EXECUTION_EVIDENCE_SYNC_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Resolve deployed no-order target state
+        id: target_state
+        env:
+          CLOUD_RUN_SERVICE: ${{ matrix.target.service }}
+        run: |
+          set -euo pipefail
+          gcloud run services describe "$CLOUD_RUN_SERVICE" --region "$CLOUD_RUN_REGION" --format=json > service.json
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+
+          service = json.load(open("service.json", encoding="utf-8"))
+          runtime_env = {
+              item.get("name"): item.get("value", "")
+              for container in (((service.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers", [])
+              for item in (container.get("env") or [])
+              if "value" in item
+          }
+          raw_target = str(runtime_env.get("RUNTIME_TARGET_JSON") or "")
+          try:
+              target = json.loads(raw_target) if raw_target else {}
+          except json.JSONDecodeError:
+              target = {}
+          if not isinstance(target, dict):
+              target = {}
+
+          enabled = str(runtime_env.get("RUNTIME_TARGET_ENABLED") or target.get("runtime_target_enabled") or "true").strip().lower()
+          if enabled not in {"true", "false"}:
+              raise SystemExit("deployed RUNTIME_TARGET_ENABLED must be true or false")
+          mode = str(target.get("execution_mode") or "").strip()
+          if mode not in {"dry_run", "paper", "live"}:
+              mode = "dry_run" if str(runtime_env.get("IBKR_DRY_RUN_ONLY") or "").strip().lower() == "true" else "live"
+
+          with open("runtime-target.json", "w", encoding="utf-8") as output:
+              json.dump(target, output, separators=(",", ":"))
+          print(f"configured_state={'enabled' if enabled == 'true' else 'disabled'}")
+          print(f"execution_mode={mode}")
+          PY
+
+      - name: Check Cloud Run runtime without notification side effects
+        id: runtime_guard
+        env:
+          RUNTIME_GUARD_NAME: InteractiveBrokersPlatform ${{ matrix.target.label }} lifecycle
+          RUNTIME_GUARD_CLOUD_RUN_SERVICES: ${{ matrix.target.service }}
+          CLOUD_RUN_SERVICE: ${{ matrix.target.service }}
+          RUNTIME_GUARD_FAIL_WORKFLOW_ON_ALERT: "true"
+        run: |
+          set -uo pipefail
+          set +e
+          python scripts/cloud_run_runtime_guard.py > runtime-guard.log 2>&1
+          exit_code=$?
+          set -e
+          cat runtime-guard.log
+          if [ "$exit_code" -eq 0 ]; then
+            status=pass
+          elif grep -Eqi 'log query failed|internal error|network|timed out|unable to list' runtime-guard.log; then
+            status=unavailable
+          else
+            status=attention
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Install market calendar for enabled heartbeat
+        if: ${{ steps.target_state.outputs.configured_state == 'enabled' }}
+        run: >-
+          python -m pip install --disable-pip-version-check
+          --retries 3 --timeout 30 "pandas-market-calendars==5.4.0"
+
+      - name: Check enabled execution heartbeat without notification side effects
+        id: execution_heartbeat
+        env:
+          RUNTIME_HEARTBEAT_NAME: InteractiveBrokersPlatform ${{ matrix.target.label }} lifecycle
+          RUNTIME_HEARTBEAT_REPORT_PLATFORM: interactive_brokers
+          RUNTIME_HEARTBEAT_REQUIRED_SERVICES: ${{ matrix.target.service }}
+          RUNTIME_HEARTBEAT_FAIL_WORKFLOW_ON_ALERT: "true"
+        run: |
+          set -uo pipefail
+          if [ "${{ steps.target_state.outputs.configured_state }}" = "disabled" ]; then
+            echo "status=not_applicable" >> "$GITHUB_OUTPUT"
+            echo "Execution heartbeat is not applicable because this target is deliberately disabled."
+            exit 0
+          fi
+
+          export RUNTIME_TARGET_JSON="$(cat runtime-target.json)"
+          set +e
+          python scripts/execution_report_heartbeat.py > execution-heartbeat.log 2>&1
+          exit_code=$?
+          set -e
+          cat execution-heartbeat.log
+          if [ "$exit_code" -eq 0 ] && grep -qi 'heartbeat skipped' execution-heartbeat.log; then
+            status=not_due
+          elif [ "$exit_code" -eq 0 ]; then
+            status=pass
+          elif grep -Eqi 'gcloud|storage|network|timed out|internal error|unable to list' execution-heartbeat.log; then
+            status=unavailable
+          else
+            status=attention
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Detect unified control-plane ingress
+        id: lifecycle_ingress
+        env:
+          EXECUTION_EVIDENCE_SYNC_TOKEN: ${{ secrets.EXECUTION_EVIDENCE_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${EXECUTION_EVIDENCE_SYNC_URL:-}" ] && [ -n "${EXECUTION_EVIDENCE_SYNC_TOKEN:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish lifecycle to the unified control plane
+        if: ${{ steps.lifecycle_ingress.outputs.enabled == 'true' }}
+        uses: QuantStrategyLab/QuantRuntimeSettings/actions/publish-runtime-target-lifecycle@6d71e785dbf21bac6c829a1fc72f3a4492d36f54
+        with:
+          source-id: ibkr.${{ matrix.target.id }}
+          target-id: ibkr.${{ matrix.target.id }}
+          platform: ibkr
+          configured-state: ${{ steps.target_state.outputs.configured_state }}
+          execution-mode: ${{ steps.target_state.outputs.execution_mode }}
+          runtime-guard: ${{ steps.runtime_guard.outputs.status }}
+          execution-heartbeat: ${{ steps.execution_heartbeat.outputs.status }}
+          sync-url: ${{ env.EXECUTION_EVIDENCE_SYNC_URL }}
+        env:
+          EXECUTION_EVIDENCE_SYNC_TOKEN: ${{ secrets.EXECUTION_EVIDENCE_SYNC_TOKEN }}
+
+      - name: Explain missing lifecycle ingress configuration
+        if: ${{ steps.lifecycle_ingress.outputs.enabled != 'true' }}
+        run: |
+          echo "Lifecycle was checked but not centrally published: configure EXECUTION_EVIDENCE_SYNC_URL and EXECUTION_EVIDENCE_SYNC_TOKEN." >&2
+
+      - name: Summarize no-order lifecycle
+        run: |
+          {
+            echo "## Runtime target lifecycle"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Target | ibkr.${{ matrix.target.id }} |"
+            echo "| Configured state | ${{ steps.target_state.outputs.configured_state }} |"
+            echo "| Intended lane | ${{ steps.target_state.outputs.execution_mode }} |"
+            echo "| Runtime guard | ${{ steps.runtime_guard.outputs.status }} |"
+            echo "| Execution heartbeat | ${{ steps.execution_heartbeat.outputs.status }} |"
+            echo
+            echo "This workflow is read-only: it cannot enable a target, alter its lane, or submit an order."
+          } >> "$GITHUB_STEP_SUMMARY"
