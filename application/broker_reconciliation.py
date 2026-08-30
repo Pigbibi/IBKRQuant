@@ -24,7 +24,6 @@ from quant_platform_kit.common.broker_reconciliation import (
     evaluate_broker_reconciliation_recovery,
 )
 from quant_platform_kit.common.execution_state import build_execution_marker_store_from_env
-from quant_platform_kit.common.live_continuity import runtime_target_fingerprint
 
 
 class IBKRReconciliationReadError(RuntimeError):
@@ -383,13 +382,14 @@ def _continuity_fields(runtime_target: Any) -> tuple[str, str, str]:
         raise IBKRReconciliationReadError(
             "IBKR reconciliation live-continuity baseline is incomplete."
         )
-    try:
-        runtime_target_sha256 = runtime_target_fingerprint(runtime_target.to_dict())
-    except Exception as exc:
-        raise IBKRReconciliationReadError(
-            "IBKR reconciliation could not fingerprint the current runtime target."
-        ) from exc
-    return baseline_id, baseline_target_sha256, runtime_target_sha256
+    # ``resolve_runtime_target_from_env`` verifies this digest against the
+    # original RUNTIME_TARGET_JSON before it returns RuntimeTarget.  Do not
+    # re-fingerprint ``RuntimeTarget.to_dict()`` here: that representation
+    # adds derived execution fields, so a legacy JSON baseline could be
+    # falsely reported as changed even though the deployed target is valid.
+    # The broker evidence remains strictly bound to the startup-validated
+    # baseline; this only removes a representation-level false mismatch.
+    return baseline_id, baseline_target_sha256, baseline_target_sha256
 
 
 def build_reconciliation_candidate(
