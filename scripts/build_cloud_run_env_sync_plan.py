@@ -409,17 +409,39 @@ def _build_target_plan(
     raw_profile = str(runtime_target.get("strategy_profile") or "").strip()
     if not raw_profile:
         raise ValueError(f"Target {service_name} runtime_target.strategy_profile is required")
-    definition = resolve_strategy_definition(raw_profile, platform_id=IBKR_PLATFORM)
-    canonical_profile = definition.profile
-    runtime_target["strategy_profile"] = canonical_profile
+    configured_runtime_enabled = _target_env_value(
+        target,
+        defaults,
+        env,
+        "RUNTIME_TARGET_ENABLED",
+        per_service_mode=per_service_mode,
+        allow_shared_fallback=False,
+    )
+    runtime_is_enabled = (
+        _runtime_target_enabled({"RUNTIME_TARGET_ENABLED": configured_runtime_enabled})
+        if configured_runtime_enabled is not None
+        else True
+    )
+    try:
+        definition = resolve_strategy_definition(raw_profile, platform_id=IBKR_PLATFORM)
+        canonical_profile = definition.profile
+    except ValueError:
+        if runtime_is_enabled:
+            raise
+        # Disabled legacy services must remain observable and deployable while
+        # their old strategy is retired from the active registry.  They cannot
+        # receive normal execution because their runtime target stays disabled.
+        canonical_profile = raw_profile
 
+    runtime_target["strategy_profile"] = canonical_profile
     status = status_rows.get(canonical_profile)
     if status is None:
-        supported = ", ".join(sorted(status_rows))
-        raise ValueError(
-            f"Unsupported STRATEGY_PROFILE={raw_profile!r} for {service_name}; supported: {supported}"
-        )
-    if not status.get("eligible") or not status.get("enabled"):
+        if runtime_is_enabled:
+            supported = ", ".join(sorted(status_rows))
+            raise ValueError(
+                f"Unsupported STRATEGY_PROFILE={raw_profile!r} for {service_name}; supported: {supported}"
+            )
+    elif runtime_is_enabled and (not status.get("eligible") or not status.get("enabled")):
         raise ValueError(
             f"STRATEGY_PROFILE={raw_profile!r} is not eligible/enabled for {service_name}: {status}"
         )
