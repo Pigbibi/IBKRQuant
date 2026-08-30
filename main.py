@@ -1877,7 +1877,7 @@ def _handle_reconciliation():
         observations = collect_read_only_reconciliation_observations(
             ib,
             account_ids=ACCOUNT_IDS,
-            fetch_portfolio_snapshot=fetch_market_portfolio_snapshot,
+            fetch_portfolio_snapshot=fetch_portfolio_snapshot,
             market_currency=MARKET_CURRENCY,
             cash_only_execution=CASH_ONLY_EXECUTION,
         )
