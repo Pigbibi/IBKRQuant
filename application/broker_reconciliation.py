@@ -11,11 +11,34 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+import os
 from typing import Any
+
+from quant_platform_kit.common.broker_reconciliation import (
+    BrokerReconciliationEvidence,
+    BrokerReconciliationFinding,
+    build_broker_reconciliation_evidence,
+    calculate_broker_observation_sha256,
+    evaluate_broker_reconciliation_recovery,
+)
+from quant_platform_kit.common.execution_state import build_execution_marker_store_from_env
+from quant_platform_kit.common.live_continuity import runtime_target_fingerprint
 
 
 class IBKRReconciliationReadError(RuntimeError):
     """Raised when a required read-only broker surface cannot be reconciled."""
+
+
+IBKR_RECONCILIATION_EXPECTED_DIGESTS_ENV = "IBKR_RECONCILIATION_EXPECTED_DIGESTS_JSON"
+_EXPECTED_DIGEST_KEYS = (
+    "positions_sha256",
+    "cash_sha256",
+    "open_orders_sha256",
+    "recent_executions_sha256",
+    "local_execution_ledger_sha256",
+)
 
 
 def _text(value: object) -> str:
@@ -218,6 +241,30 @@ class IBKRReconciliationObservations:
     recent_executions: tuple[Mapping[str, object], ...]
 
 
+@dataclass(frozen=True)
+class IBKRReconciliationCandidate:
+    """Public-safe recovery candidate; the raw broker observations are omitted."""
+
+    evidence: BrokerReconciliationEvidence
+    recovery_blockers: tuple[BrokerReconciliationFinding, ...]
+    expected_digests_configured: bool
+    execution_ledger_records_count: int
+
+    @property
+    def permits_active_lkg(self) -> bool:
+        return not self.recovery_blockers
+
+    def to_safe_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": "ibkr_reconciliation_candidate.v1",
+            "permits_active_lkg": self.permits_active_lkg,
+            "expected_digests_configured": self.expected_digests_configured,
+            "execution_ledger_records_count": self.execution_ledger_records_count,
+            "recovery_blockers": [finding.value for finding in self.recovery_blockers],
+            "evidence": self.evidence.to_dict(),
+        }
+
+
 def collect_read_only_reconciliation_observations(
     ib: Any,
     *,
@@ -299,9 +346,148 @@ def collect_read_only_reconciliation_observations(
     )
 
 
+def _resolve_expected_digests(
+    *,
+    env_reader: Callable[[str, str | None], str | None] = os.getenv,
+) -> Mapping[str, str] | None:
+    raw_value = env_reader(IBKR_RECONCILIATION_EXPECTED_DIGESTS_ENV, None)
+    if not _text(raw_value):
+        return None
+    try:
+        decoded = json.loads(str(raw_value))
+    except (TypeError, ValueError) as exc:
+        raise IBKRReconciliationReadError(
+            "IBKR reconciliation expected-digest configuration is not valid JSON."
+        ) from exc
+    if not isinstance(decoded, Mapping):
+        raise IBKRReconciliationReadError(
+            "IBKR reconciliation expected-digest configuration must be an object."
+        )
+    normalized = {key: _text(decoded.get(key)) for key in _EXPECTED_DIGEST_KEYS}
+    if any(not value for value in normalized.values()):
+        raise IBKRReconciliationReadError(
+            "IBKR reconciliation expected-digest configuration is incomplete."
+        )
+    return normalized
+
+
+def _continuity_fields(runtime_target: Any) -> tuple[str, str, str]:
+    continuity = getattr(runtime_target, "live_continuity", None)
+    if continuity is None:
+        raise IBKRReconciliationReadError(
+            "IBKR reconciliation requires a frozen live-continuity baseline."
+        )
+    baseline_id = _text(getattr(continuity, "baseline_id", ""))
+    baseline_target_sha256 = _text(getattr(continuity, "baseline_target_sha256", "")).lower()
+    if not baseline_id or not baseline_target_sha256:
+        raise IBKRReconciliationReadError(
+            "IBKR reconciliation live-continuity baseline is incomplete."
+        )
+    try:
+        runtime_target_sha256 = runtime_target_fingerprint(runtime_target.to_dict())
+    except Exception as exc:
+        raise IBKRReconciliationReadError(
+            "IBKR reconciliation could not fingerprint the current runtime target."
+        ) from exc
+    return baseline_id, baseline_target_sha256, runtime_target_sha256
+
+
+def build_reconciliation_candidate(
+    *,
+    observations: IBKRReconciliationObservations,
+    runtime_target: Any,
+    platform_id: str,
+    strategy_profile: str,
+    account_group: str,
+    project_id: str | None,
+    env_reader: Callable[[str, str | None], str | None] = os.getenv,
+    observed_at: datetime | None = None,
+) -> IBKRReconciliationCandidate:
+    """Build a fail-closed, redacted recovery candidate from read-only data.
+
+    The expected digests are deliberately optional for the *first* legacy
+    probe.  If they do not yet exist, every state surface stays unmatched and
+    the candidate remains in ``RECONCILE_ONLY``.  A trusted control plane must
+    independently establish those digests before a later candidate can pass.
+    """
+
+    expected_digests = _resolve_expected_digests(env_reader=env_reader)
+    account_scope_sha256 = calculate_broker_observation_sha256(observations.account_scope)
+    positions_sha256 = calculate_broker_observation_sha256(observations.positions)
+    cash_sha256 = calculate_broker_observation_sha256(observations.cash)
+    open_orders_sha256 = calculate_broker_observation_sha256(observations.open_orders)
+    recent_executions_sha256 = calculate_broker_observation_sha256(observations.recent_executions)
+    execution_state_store = build_execution_marker_store_from_env(
+        platform_env_prefix="IBKR",
+        env_reader=env_reader,
+        project_id=project_id,
+    )
+    local_execution_ledger_sha256, ledger_records_count = (
+        execution_state_store.calculate_recent_ledger_digest(
+            platform=platform_id,
+            strategy_profile=strategy_profile,
+            account_scope=account_group,
+            execution_mode="live",
+        )
+    )
+    baseline_id, baseline_target_sha256, runtime_target_sha256 = _continuity_fields(runtime_target)
+
+    def matches(key: str, actual_digest: str) -> bool:
+        return expected_digests is not None and expected_digests[key] == actual_digest
+
+    evidence = build_broker_reconciliation_evidence(
+        platform_id=platform_id,
+        strategy_profile=strategy_profile,
+        account_scope_sha256=account_scope_sha256,
+        baseline_id=baseline_id,
+        baseline_target_sha256=baseline_target_sha256,
+        runtime_target_sha256=runtime_target_sha256,
+        observed_at=observed_at or datetime.now(timezone.utc),
+        broker_connected=True,
+        account_identity_match=observations.account_identity_match,
+        positions_match=matches("positions_sha256", positions_sha256),
+        cash_match=matches("cash_sha256", cash_sha256),
+        open_orders_match=matches("open_orders_sha256", open_orders_sha256),
+        recent_executions_match=matches("recent_executions_sha256", recent_executions_sha256),
+        local_execution_ledger_match=matches(
+            "local_execution_ledger_sha256", local_execution_ledger_sha256
+        ),
+        positions_sha256=positions_sha256,
+        cash_sha256=cash_sha256,
+        open_orders_sha256=open_orders_sha256,
+        recent_executions_sha256=recent_executions_sha256,
+        local_execution_ledger_sha256=local_execution_ledger_sha256,
+    )
+    blockers = evaluate_broker_reconciliation_recovery(
+        evidence,
+        now=observed_at or datetime.now(timezone.utc),
+        expected_platform_id=platform_id,
+        expected_strategy_profile=strategy_profile,
+        expected_account_scope_sha256=account_scope_sha256,
+        expected_baseline_id=baseline_id,
+        expected_runtime_target_sha256=runtime_target_sha256,
+        expected_positions_sha256=(expected_digests or {}).get("positions_sha256"),
+        expected_cash_sha256=(expected_digests or {}).get("cash_sha256"),
+        expected_open_orders_sha256=(expected_digests or {}).get("open_orders_sha256"),
+        expected_recent_executions_sha256=(expected_digests or {}).get("recent_executions_sha256"),
+        expected_local_execution_ledger_sha256=(expected_digests or {}).get(
+            "local_execution_ledger_sha256"
+        ),
+    )
+    return IBKRReconciliationCandidate(
+        evidence=evidence,
+        recovery_blockers=blockers,
+        expected_digests_configured=expected_digests is not None,
+        execution_ledger_records_count=ledger_records_count,
+    )
+
+
 __all__ = [
+    "IBKR_RECONCILIATION_EXPECTED_DIGESTS_ENV",
+    "IBKRReconciliationCandidate",
     "IBKRReconciliationObservations",
     "IBKRReconciliationReadError",
+    "build_reconciliation_candidate",
     "collect_read_only_reconciliation_observations",
     "normalize_account_ids",
 ]

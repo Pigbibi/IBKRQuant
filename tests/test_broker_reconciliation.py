@@ -5,9 +5,13 @@ from types import SimpleNamespace
 import pytest
 
 from application.broker_reconciliation import (
+    IBKRReconciliationObservations,
     IBKRReconciliationReadError,
+    build_reconciliation_candidate,
     collect_read_only_reconciliation_observations,
 )
+from quant_platform_kit.common.live_continuity import runtime_target_fingerprint
+from quant_platform_kit.common.runtime_target import build_runtime_target
 
 
 def _snapshot(*, account_id: str = "U123"):
@@ -143,3 +147,113 @@ def test_unscoped_active_order_fails_closed() -> None:
             market_currency="USD",
             cash_only_execution=True,
         )
+
+
+def _frozen_runtime_target():
+    base_target = build_runtime_target(
+        platform_id="ibkr",
+        strategy_profile="soxl_soxx_trend_income",
+        dry_run_only=False,
+        deployment_selector="live",
+        account_selector=("group",),
+        account_scope="live",
+        service_name="ibkr-live",
+    )
+    payload = base_target.to_dict()
+    payload.pop("execution_mode")
+    return build_runtime_target(
+        **payload,
+        live_continuity={
+            "state": "RECONCILE_ONLY",
+            "baseline_kind": "legacy_authorized",
+            "baseline_id": "ibkr-soxl-lkg-20260830",
+            "baseline_target_sha256": runtime_target_fingerprint(base_target.to_dict()),
+            "captured_at": "2026-08-30",
+        },
+    )
+
+
+def _observations() -> IBKRReconciliationObservations:
+    return IBKRReconciliationObservations(
+        account_scope={"account_ids": ["U123"]},
+        account_identity_match=True,
+        positions=({"symbol": "SOXL", "quantity": 10.0},),
+        cash=({"currency": "USD", "tags": {"CashBalance": 123.45}},),
+        open_orders=(),
+        recent_executions=(),
+    )
+
+
+def test_candidate_stays_frozen_without_private_expected_digests(tmp_path) -> None:
+    candidate = build_reconciliation_candidate(
+        observations=_observations(),
+        runtime_target=_frozen_runtime_target(),
+        platform_id="ibkr",
+        strategy_profile="soxl_soxx_trend_income",
+        account_group="LIVE",
+        project_id=None,
+        env_reader=lambda name, default=None: (
+            str(tmp_path) if name == "IBKR_EXECUTION_STATE_DIR" else default
+        ),
+    )
+
+    assert candidate.permits_active_lkg is False
+    assert candidate.expected_digests_configured is False
+    assert set(candidate.to_safe_dict()) == {
+        "schema_version",
+        "permits_active_lkg",
+        "expected_digests_configured",
+        "execution_ledger_records_count",
+        "recovery_blockers",
+        "evidence",
+    }
+    assert candidate.to_safe_dict()["evidence"]["positions_sha256"]
+
+
+def test_candidate_can_only_pass_with_all_matching_private_digests(tmp_path) -> None:
+    target = _frozen_runtime_target()
+
+    def empty_env(name, default=None):
+        return str(tmp_path) if name == "IBKR_EXECUTION_STATE_DIR" else default
+
+    seed = build_reconciliation_candidate(
+        observations=_observations(),
+        runtime_target=target,
+        platform_id="ibkr",
+        strategy_profile="soxl_soxx_trend_income",
+        account_group="LIVE",
+        project_id=None,
+        env_reader=empty_env,
+    )
+    expected = {
+        key: seed.evidence.to_dict()[key]
+        for key in (
+            "positions_sha256",
+            "cash_sha256",
+            "open_orders_sha256",
+            "recent_executions_sha256",
+            "local_execution_ledger_sha256",
+        )
+    }
+
+    def configured_env(name, default=None):
+        if name == "IBKR_EXECUTION_STATE_DIR":
+            return str(tmp_path)
+        if name == "IBKR_RECONCILIATION_EXPECTED_DIGESTS_JSON":
+            import json
+
+            return json.dumps(expected)
+        return default
+
+    candidate = build_reconciliation_candidate(
+        observations=_observations(),
+        runtime_target=target,
+        platform_id="ibkr",
+        strategy_profile="soxl_soxx_trend_income",
+        account_group="LIVE",
+        project_id=None,
+        env_reader=configured_env,
+    )
+
+    assert candidate.permits_active_lkg is True
+    assert candidate.recovery_blockers == ()
