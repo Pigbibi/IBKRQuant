@@ -45,3 +45,11 @@ AIAuditBridge 的完整 `reconciliation_baseline` 输出。它会同时核验：
 `execution_authority_granted=false`、`state_write_attempted=false`；它没有 Cloud Run、
 券商、执行标记或订单写入代码。下一层单独的最小权限控制器才可消费该计划，并且仍要
 在同一目标上比较五项摘要后执行一次精确 CAS。
+
+## 故障注入回归
+
+恢复链路的回归测试会主动注入：控制台把不可执行策略篡改为可执行、五项摘要之一
+漂移、人工确认过期、确认与新回执同秒、运行目标不再是 `RECONCILE_ONLY`、以及控制器
+令牌被试图发送到普通管理站路径。每一种情况都必须抛出拒绝或返回没有
+`transition_plan` 的结果；测试同时断言 `state_write_attempted=false`。这让后续接入
+最小权限 CAS 时能持续证明“异常只能保持冻结，不能意外恢复实盘”。
