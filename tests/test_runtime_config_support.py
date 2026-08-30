@@ -1392,6 +1392,54 @@ def test_build_cloud_run_env_sync_plan_does_not_enable_live_dedup_implicitly() -
         assert "IBKR_EXECUTION_DEDUP_ENABLED" in target["remove_env_vars"]
 
 
+def test_build_cloud_run_env_sync_plan_preserves_disabled_legacy_strategy_outside_active_registry() -> None:
+    payload = {
+        "defaults": {
+            "GLOBAL_TELEGRAM_CHAT_ID": "test-chat",
+            "NOTIFY_LANG": "zh",
+            "IB_ACCOUNT_GROUP_CONFIG_SECRET_NAME": "ibkr-account-groups",
+        },
+        "targets": [
+            {
+                "service": "interactive-brokers-us-combo-shadow-service",
+                "account_group": "us-combo-shadow",
+                "runtime_target_enabled": False,
+                "runtime_target": {
+                    "platform_id": "ibkr",
+                    "strategy_profile": "us_equity_combo_leveraged",
+                    "execution_mode": "paper",
+                    "dry_run_only": True,
+                    "deployment_selector": "us-combo-shadow",
+                    "account_scope": "us-combo-shadow",
+                    "service_name": "interactive-brokers-us-combo-shadow-service",
+                },
+            }
+        ],
+    }
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    target = json.loads(result.stdout)["targets"][0]
+    assert target["env"]["RUNTIME_TARGET_ENABLED"] == "false"
+    assert target["env"]["STRATEGY_PROFILE"] == "us_equity_combo_leveraged"
+
+    payload["targets"][0]["runtime_target_enabled"] = True
+    rejected = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+    assert rejected.returncode != 0
+    assert "Unsupported STRATEGY_PROFILE" in rejected.stderr
+
+
 def test_build_cloud_run_env_sync_plan_removes_unset_force_run() -> None:
     payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
     result = subprocess.run(
