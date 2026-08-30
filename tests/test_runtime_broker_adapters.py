@@ -352,3 +352,22 @@ def test_connect_ib_skips_trading_permission_probe_for_dry_run():
     )
 
     assert adapters.connect_ib().managedAccounts() == ["U1234567"]
+
+
+def test_connect_ib_skips_trading_permission_probe_for_explicit_read_only_connection():
+    class FakeIB:
+        def managedAccounts(self):
+            return ["U1234567"]
+
+        def whatIfOrder(self, _contract, _order):
+            pytest.fail("read-only connection must not probe trading permissions")
+
+    adapters = _build_adapters(account_ids=("U1234567",), execution_mode="live")
+    adapters = adapters.__class__(
+        **{
+            **adapters.__dict__,
+            "connect_ib_fn": lambda *_args, **_kwargs: FakeIB(),
+        }
+    )
+
+    assert adapters.connect_ib(validate_trading_permissions=False).managedAccounts() == ["U1234567"]

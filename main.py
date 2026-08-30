@@ -882,9 +882,11 @@ def require_gateway_execution_backend():
     )
 
 
-def connect_ib():
+def connect_ib(*, validate_trading_permissions: bool = True):
     require_gateway_execution_backend()
-    return build_broker_adapters().connect_ib()
+    return build_broker_adapters().connect_ib(
+        validate_trading_permissions=validate_trading_permissions,
+    )
 
 
 def _build_health_probe_connection_error_message(exc: Exception) -> str:
@@ -1733,7 +1735,7 @@ def _handle_probe(*, response_body: str = "Probe OK"):
             http_method=request.method,
             execution_window="probe",
         )
-        ib = connect_ib()
+        ib = connect_ib(validate_trading_permissions=False)
         snapshot = build_portfolio_snapshot(ib)
         positions = tuple(getattr(snapshot, "positions", ()) or ())
         buying_power = float(getattr(snapshot, "buying_power", 0.0) or 0.0)
