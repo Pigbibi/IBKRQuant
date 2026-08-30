@@ -882,9 +882,20 @@ def require_gateway_execution_backend():
     )
 
 
-def connect_ib(*, validate_trading_permissions: bool = True):
+def connect_ib(
+    *,
+    read_only: bool = False,
+    validate_trading_permissions: bool = True,
+):
+    """Connect to the Gateway with an optional read-only session boundary."""
     require_gateway_execution_backend()
-    return build_broker_adapters().connect_ib(
+    # A probe must not merely skip the local what-if permission check.  Its
+    # Gateway session itself must be read-only, so a future probe change cannot
+    # accidentally acquire broker write authority.
+    adapter_dry_run_override = True if read_only else None
+    return build_broker_adapters(
+        dry_run_only_override=adapter_dry_run_override,
+    ).connect_ib(
         validate_trading_permissions=validate_trading_permissions,
     )
 
@@ -1735,7 +1746,10 @@ def _handle_probe(*, response_body: str = "Probe OK"):
             http_method=request.method,
             execution_window="probe",
         )
-        ib = connect_ib(validate_trading_permissions=False)
+        ib = connect_ib(
+            read_only=True,
+            validate_trading_permissions=False,
+        )
         snapshot = build_portfolio_snapshot(ib)
         positions = tuple(getattr(snapshot, "positions", ()) or ())
         buying_power = float(getattr(snapshot, "buying_power", 0.0) or 0.0)
