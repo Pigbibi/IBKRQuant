@@ -73,6 +73,13 @@ QPK 计划中的五项摘要、`no_order=true`、`execution_authority_granted=fa
 既有实盘目标也不受影响。本阶段不写入该变量，也不创建账本对象；因此它只是经过测试的
 兼容入口，而不是一次自动或隐式的实盘恢复。
 
+`scripts/publish_reconciliation_recovery_state_ledger.py` 则是与消费端分离的发布适配器。
+它只接受刚生成的 `ibkr_reconciliation_recovery_verification.v1`：验证结果必须无阻断、
+完整携带 QPK 计划，并且仍声明 `verify_only`、无订单、无执行授权和未尝试状态写入。默认
+只打印最小账本 JSON；只有显式提供状态前缀的 GCS URI 时才调用
+`if_generation_match=0` 创建对象。该写入不读取、列举、覆盖或删除对象，也不会设置工作流
+URI、部署 Cloud Run、连接券商或提交订单。实际启用仍需要单独的高风险控制面动作。
+
 ## 故障注入回归
 
 恢复链路的回归测试会主动注入：控制台把不可执行策略篡改为可执行、五项摘要之一

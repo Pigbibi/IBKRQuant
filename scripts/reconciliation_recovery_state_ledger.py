@@ -12,6 +12,7 @@ import copy
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from quant_platform_kit.common.live_continuity import build_live_continuity
 from quant_platform_kit.common.reconciliation_recovery import ReconciliationRecoveryTransitionPlan
@@ -19,6 +20,7 @@ from quant_platform_kit.common.reconciliation_recovery import ReconciliationReco
 
 RECOVERY_STATE_LEDGER_SCHEMA_VERSION = "ibkr_reconciliation_recovery_state_ledger.v1"
 RECOVERY_STATE_LEDGER_PATH_ENV = "IBKR_RECONCILIATION_RECOVERY_STATE_LEDGER_PATH"
+RECOVERY_VERIFICATION_SCHEMA_VERSION = "ibkr_reconciliation_recovery_verification.v1"
 
 
 def _ledger_service_name(ledger: Mapping[str, object]) -> str:
@@ -26,6 +28,64 @@ def _ledger_service_name(ledger: Mapping[str, object]) -> str:
     if not isinstance(service_name, str) or service_name != service_name.strip() or not 3 <= len(service_name) <= 127:
         raise ValueError("reconciliation recovery state ledger service_name is invalid")
     return service_name
+
+
+def build_recovery_state_ledger(
+    *,
+    verification: Mapping[str, object],
+    service_name: str,
+) -> dict[str, object]:
+    """Build one minimal state ledger from an already fresh verify-only result.
+
+    This is pure serialization.  It never creates a cloud object or changes a
+    runtime target.  Requiring the complete verify-only receipt prevents a
+    caller from turning a standalone plan into an activation intent.
+    """
+
+    required = {
+        "schema_version",
+        "recovery_id",
+        "candidate_sha256",
+        "confirmation_sha256",
+        "ready_for_atomic_state_transition",
+        "findings",
+        "transition_plan",
+        "policy",
+    }
+    if not isinstance(verification, Mapping) or set(verification) != required:
+        raise ValueError("reconciliation recovery verification has invalid fields")
+    if verification.get("schema_version") != RECOVERY_VERIFICATION_SCHEMA_VERSION:
+        raise ValueError("unsupported reconciliation recovery verification schema")
+    if verification.get("ready_for_atomic_state_transition") is not True or verification.get("findings") != []:
+        raise ValueError("reconciliation recovery verification is not ready for a state ledger")
+    expected_policy = {
+        "controller_mode": "verify_only",
+        "no_order": True,
+        "execution_authority_granted": False,
+        "state_write_attempted": False,
+    }
+    if verification.get("policy") != expected_policy:
+        raise ValueError("reconciliation recovery verification has an invalid non-execution policy")
+    raw_plan = verification.get("transition_plan")
+    if not isinstance(raw_plan, Mapping):
+        raise ValueError("reconciliation recovery verification is missing transition_plan")
+    plan = ReconciliationRecoveryTransitionPlan.from_dict(raw_plan)
+    recovery_id = str(verification.get("recovery_id") or "").strip()
+    candidate_sha256 = str(verification.get("candidate_sha256") or "").strip().lower().removeprefix("sha256:")
+    confirmation_sha256 = str(verification.get("confirmation_sha256") or "").strip().lower().removeprefix("sha256:")
+    if recovery_id != plan.recovery_id:
+        raise ValueError("reconciliation recovery verification recovery_id mismatch")
+    if candidate_sha256 != plan.candidate_sha256:
+        raise ValueError("reconciliation recovery verification candidate digest mismatch")
+    if confirmation_sha256 != plan.confirmation_sha256:
+        raise ValueError("reconciliation recovery verification confirmation digest mismatch")
+    _ledger_service_name({"service_name": service_name})
+    return {
+        "schema_version": RECOVERY_STATE_LEDGER_SCHEMA_VERSION,
+        "recovery_id": plan.recovery_id,
+        "service_name": service_name,
+        "transition_plan": plan.to_dict(),
+    }
 
 
 def apply_recovery_state_ledger(
@@ -108,6 +168,8 @@ def apply_recovery_state_ledger_from_env(
 __all__ = [
     "RECOVERY_STATE_LEDGER_PATH_ENV",
     "RECOVERY_STATE_LEDGER_SCHEMA_VERSION",
+    "RECOVERY_VERIFICATION_SCHEMA_VERSION",
     "apply_recovery_state_ledger",
     "apply_recovery_state_ledger_from_env",
+    "build_recovery_state_ledger",
 ]
