@@ -562,8 +562,13 @@ def test_handle_probe_checks_account_snapshot_without_success_notification(strat
         "attach_strategy_plugin_report",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("health probe should not attach strategy plugin reports")),
     )
-    def fake_connect_ib(*, validate_trading_permissions=True):
-        observed["connection_options"].append(validate_trading_permissions)
+    def fake_connect_ib(*, read_only=False, validate_trading_permissions=True):
+        observed["connection_options"].append(
+            {
+                "read_only": read_only,
+                "validate_trading_permissions": validate_trading_permissions,
+            }
+        )
         return FakeIB()
 
     monkeypatch.setattr(strategy_module, "connect_ib", fake_connect_ib)
@@ -589,7 +594,9 @@ def test_handle_probe_checks_account_snapshot_without_success_notification(strat
     assert observed["report"]["summary"]["positions_count"] == 1
     assert observed["disconnects"] == 1
     assert observed["notifications"] == []
-    assert observed["connection_options"] == [False]
+    assert observed["connection_options"] == [
+        {"read_only": True, "validate_trading_permissions": False}
+    ]
 
 
 def test_handle_probe_connect_timeout_sends_concise_connection_notification(strategy_module, monkeypatch):

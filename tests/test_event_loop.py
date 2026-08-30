@@ -51,6 +51,22 @@ def test_live_runtime_adapter_keeps_writable_gateway_session(strategy_module_fac
     assert observed["args"] == ("127.0.0.1", 4001, 1, {"timeout": 60, "readonly": False})
 
 
+def test_live_runtime_can_force_a_read_only_gateway_session(strategy_module_factory, monkeypatch):
+    module = strategy_module_factory(IBKR_DRY_RUN_ONLY="false")
+    observed = {}
+
+    def fake_ibkr_connect(host, port, client_id, **kwargs):
+        observed["args"] = (host, port, client_id, kwargs)
+        return object()
+
+    monkeypatch.setattr(module, "ibkr_connect_ib", fake_ibkr_connect)
+
+    adapters = module.build_broker_adapters(dry_run_only_override=True)
+    adapters.connect_ib_fn("127.0.0.1", 4001, 1, timeout=60)
+
+    assert observed["args"] == ("127.0.0.1", 4001, 1, {"timeout": 60, "readonly": True})
+
+
 def test_connect_ib_retries_with_offset_client_ids(strategy_module_factory, monkeypatch):
     module = strategy_module_factory(
         IBKR_CONNECT_ATTEMPTS="3",
