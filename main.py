@@ -19,6 +19,10 @@ except ImportError:
     get_compute_discovery = None
 
 from application.cycle_result import coerce_strategy_cycle_result
+from application.execution_receipt_adapter import (
+    attach_cycle_execution_receipt,
+    attach_terminal_fallback_execution_receipt,
+)
 from application.broker_reconciliation import (
     IBKRReconciliationReadError,
     build_reconciliation_candidate,
@@ -1594,6 +1598,12 @@ def _handle_request(
         }
         if execution_failed:
             report_diagnostics["failure_category"] = "strategy_execution_blocked"
+        attach_cycle_execution_receipt(
+            report,
+            execution_summary,
+            reconciliation_record,
+            execution_failed=execution_failed,
+        )
         finalize_runtime_report(
             report,
             status="error" if execution_failed else "ok",
@@ -1726,6 +1736,13 @@ def _handle_request(
     finally:
         if lock_acquired:
             STRATEGY_RUN_LOCK.release()
+        if "execution_receipt" not in report:
+            try:
+                attach_terminal_fallback_execution_receipt(report)
+            except ValueError:
+                # A legacy runtime target remains visible as evidence-missing;
+                # reporting metadata must never change trading behavior.
+                pass
         if not deadline_exceeded and persist_report:
             try:
                 if dry_run_only_override is None:
