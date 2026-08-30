@@ -19,6 +19,11 @@ except ImportError:
     get_compute_discovery = None
 
 from application.cycle_result import coerce_strategy_cycle_result
+from application.broker_reconciliation import (
+    IBKRReconciliationReadError,
+    build_reconciliation_candidate,
+    collect_read_only_reconciliation_observations,
+)
 from application.runtime_broker_adapters import (
     IBKRGatewayUnavailableError,
     IBKRTradingPermissionError,
@@ -1845,6 +1850,126 @@ def _handle_probe(*, response_body: str = "Probe OK"):
             print(f"failed to persist execution report: {persist_exc}", flush=True)
 
 
+def _handle_reconciliation():
+    """Build a read-only, fail-closed candidate for one frozen live baseline."""
+
+    ib = None
+    log_context = None
+    report = None
+    try:
+        log_context = build_request_log_context()
+        report = build_execution_report(log_context, dry_run_only_override=True)
+        runtime_target = RUNTIME_SETTINGS.runtime_target
+        if runtime_target is None:
+            raise IBKRReconciliationReadError(
+                "IBKR reconciliation requires an explicit runtime target."
+            )
+        log_runtime_event(
+            log_context,
+            "broker_reconciliation_received",
+            message="Received broker reconciliation request",
+            execution_window="reconciliation",
+        )
+        ib = connect_ib(
+            read_only=True,
+            validate_trading_permissions=False,
+        )
+        observations = collect_read_only_reconciliation_observations(
+            ib,
+            account_ids=ACCOUNT_IDS,
+            fetch_portfolio_snapshot=fetch_market_portfolio_snapshot,
+            market_currency=MARKET_CURRENCY,
+            cash_only_execution=CASH_ONLY_EXECUTION,
+        )
+        candidate = build_reconciliation_candidate(
+            observations=observations,
+            runtime_target=runtime_target,
+            platform_id=runtime_target.platform_id,
+            strategy_profile=STRATEGY_PROFILE,
+            account_group=ACCOUNT_GROUP,
+            project_id=PROJECT_ID,
+        )
+        payload = candidate.to_safe_dict()
+        finalize_runtime_report(
+            report,
+            status="ok",
+            summary={
+                "broker_reconciliation_permits_active_lkg": candidate.permits_active_lkg,
+                "broker_reconciliation_blockers_count": len(candidate.recovery_blockers),
+                "broker_reconciliation_ledger_records_count": candidate.execution_ledger_records_count,
+            },
+            diagnostics={"broker_reconciliation": payload},
+        )
+        log_runtime_event(
+            log_context,
+            "broker_reconciliation_completed",
+            message="Broker reconciliation candidate completed",
+            execution_window="reconciliation",
+            permits_active_lkg=candidate.permits_active_lkg,
+            blockers=[finding.value for finding in candidate.recovery_blockers],
+            expected_digests_configured=candidate.expected_digests_configured,
+            execution_ledger_records_count=candidate.execution_ledger_records_count,
+        )
+        return json.dumps(payload, ensure_ascii=False), 200, {"Content-Type": "application/json"}
+    except (IBKRReconciliationReadError, ConnectionError, TimeoutError) as exc:
+        if report is not None:
+            append_runtime_report_error(
+                report,
+                stage="broker_reconciliation",
+                message=str(exc),
+                error_type=type(exc).__name__,
+                failure_category="broker_reconciliation",
+            )
+            finalize_runtime_report(
+                report,
+                status="error",
+                diagnostics={"broker_reconciliation_failure": type(exc).__name__},
+            )
+        if log_context is not None:
+            log_runtime_event(
+                log_context,
+                "broker_reconciliation_failed",
+                message="Broker reconciliation failed",
+                severity="ERROR",
+                execution_window="reconciliation",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+        return "Error", 503
+    except Exception as exc:
+        if report is not None:
+            append_runtime_report_error(
+                report,
+                stage="broker_reconciliation",
+                message=str(exc),
+                error_type=type(exc).__name__,
+            )
+            finalize_runtime_report(report, status="error")
+        if log_context is not None:
+            log_runtime_event(
+                log_context,
+                "broker_reconciliation_failed",
+                message="Broker reconciliation failed",
+                severity="ERROR",
+                execution_window="reconciliation",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+        return "Error", 500
+    finally:
+        if ib is not None and hasattr(ib, "disconnect"):
+            try:
+                ib.disconnect()
+            except Exception as disconnect_exc:
+                print(f"failed to disconnect IBKR reconciliation client: {disconnect_exc}", flush=True)
+        try:
+            if report is not None:
+                report_path = persist_execution_report(report, dry_run_only_override=True)
+                print(f"execution_report {report_path}", flush=True)
+        except Exception as persist_exc:
+            print(f"failed to persist reconciliation report: {persist_exc}", flush=True)
+
+
 def _handle_monitor_dispatch():
     if request.method == "GET":
         return "Monitor Dispatch OK - use POST to dispatch due monitor checks", 200
@@ -1989,6 +2114,14 @@ def handle_paper_execution_command_consumer():
 @app.route("/probe", methods=["POST", "GET"])
 def handle_probe():
     return _route_with_runtime_error_fallback(_handle_probe)
+
+
+@app.route("/reconcile", methods=["POST"])
+def handle_reconciliation():
+    return _route_with_runtime_error_fallback(
+        _handle_reconciliation,
+        route_label="broker-reconciliation",
+    )
 
 
 @app.route("/monitor-dispatch", methods=["POST", "GET"])
