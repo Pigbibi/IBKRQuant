@@ -114,11 +114,22 @@ def verify_service(*, service: str, service_json: Mapping[str, Any]) -> dict[str
     raw_profile = str(target.get("strategy_profile") or "").strip()
     if not raw_profile:
         raise AdmissionError(f"{service}: runtime target strategy_profile is required")
+    enabled = _parse_bool(
+        env.get("RUNTIME_TARGET_ENABLED", "true"),
+        field="RUNTIME_TARGET_ENABLED",
+        service=service,
+    )
     try:
         definition = resolve_strategy_definition(raw_profile, platform_id=IBKR_PLATFORM)
     except (TypeError, ValueError) as exc:
-        raise AdmissionError(f"{service}: strategy profile is not admitted") from exc
-    canonical_profile = definition.profile
+        if enabled:
+            raise AdmissionError(f"{service}: strategy profile is not admitted") from exc
+        # A retired service that is explicitly disabled cannot receive normal
+        # execution.  Keep it observable during a fleet rollout instead of
+        # blocking admitted services that share the deployment plan.
+        canonical_profile = raw_profile
+    else:
+        canonical_profile = definition.profile
     configured_profile = str(env.get("STRATEGY_PROFILE") or "").strip()
     if configured_profile != canonical_profile:
         raise AdmissionError(
@@ -145,11 +156,6 @@ def verify_service(*, service: str, service_json: Mapping[str, Any]) -> dict[str
             f"{service}: a dry-run/shadow target must declare execution_mode=paper"
         )
 
-    enabled = _parse_bool(
-        env.get("RUNTIME_TARGET_ENABLED", "true"),
-        field="RUNTIME_TARGET_ENABLED",
-        service=service,
-    )
     return {
         "service": service,
         "profile": canonical_profile,

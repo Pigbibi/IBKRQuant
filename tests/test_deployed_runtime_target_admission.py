@@ -16,7 +16,13 @@ admission = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(admission)
 
 
-def service_payload(*, runtime_target: dict, profile: str, dry_run_only: str = "true") -> dict:
+def service_payload(
+    *,
+    runtime_target: dict,
+    profile: str,
+    dry_run_only: str = "true",
+    runtime_target_enabled: str = "true",
+) -> dict:
     return {
         "spec": {
             "template": {
@@ -27,7 +33,7 @@ def service_payload(*, runtime_target: dict, profile: str, dry_run_only: str = "
                                 {"name": "RUNTIME_TARGET_JSON", "value": json.dumps(runtime_target)},
                                 {"name": "STRATEGY_PROFILE", "value": profile},
                                 {"name": "IBKR_DRY_RUN_ONLY", "value": dry_run_only},
-                                {"name": "RUNTIME_TARGET_ENABLED", "value": "true"},
+                                {"name": "RUNTIME_TARGET_ENABLED", "value": runtime_target_enabled},
                             ]
                         }
                     ]
@@ -106,3 +112,19 @@ def test_verify_service_rejects_retired_profile():
             service="shadow-service",
             service_json=service_payload(runtime_target=target, profile="retired_profile"),
         )
+
+
+def test_verify_service_accepts_retired_profile_only_when_target_is_disabled():
+    target = admitted_target(profile="retired_profile")
+
+    result = admission.verify_service(
+        service="shadow-service",
+        service_json=service_payload(
+            runtime_target=target,
+            profile="retired_profile",
+            runtime_target_enabled="false",
+        ),
+    )
+
+    assert result["profile"] == "retired_profile"
+    assert result["enabled"] is False
