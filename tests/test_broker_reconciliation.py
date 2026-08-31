@@ -120,6 +120,79 @@ def test_collects_scoped_read_only_broker_observations() -> None:
     assert observations.open_orders[0]["account"] == "U123"
 
 
+def test_cash_reconciliation_ignores_dynamic_margin_and_valuation_tags() -> None:
+    def fetch_snapshot(_ib, *, dynamic_net_liquidation: float, dynamic_available_funds: float, **_kwargs):
+        return SimpleNamespace(
+            positions=(),
+            metadata={
+                "cash_balances": (
+                    {
+                        "account_id": "U123",
+                        "currency": "USD",
+                        "CashBalance": 123.45,
+                        "AvailableFunds": dynamic_available_funds,
+                        "NetLiquidation": dynamic_net_liquidation,
+                    },
+                ),
+                "option_positions": (),
+            },
+        )
+
+    ib = _IB()
+    first = collect_read_only_reconciliation_observations(
+        ib,
+        account_ids=("U123",),
+        fetch_portfolio_snapshot=lambda *args, **kwargs: fetch_snapshot(
+            *args,
+            **kwargs,
+            dynamic_net_liquidation=1_000.0,
+            dynamic_available_funds=700.0,
+        ),
+        market_currency="USD",
+        cash_only_execution=True,
+    )
+    second = collect_read_only_reconciliation_observations(
+        ib,
+        account_ids=("U123",),
+        fetch_portfolio_snapshot=lambda *args, **kwargs: fetch_snapshot(
+            *args,
+            **kwargs,
+            dynamic_net_liquidation=1_050.0,
+            dynamic_available_funds=750.0,
+        ),
+        market_currency="USD",
+        cash_only_execution=True,
+    )
+
+    assert first.cash == second.cash == (
+        {"account": "U123", "currency": "USD", "tags": {"CashBalance": 123.45}},
+    )
+
+
+def test_cash_reconciliation_fails_closed_without_a_cash_balance_tag() -> None:
+    with pytest.raises(IBKRReconciliationReadError, match="stable cash-balance tag"):
+        collect_read_only_reconciliation_observations(
+            _IB(),
+            account_ids=("U123",),
+            fetch_portfolio_snapshot=lambda *_args, **_kwargs: SimpleNamespace(
+                positions=(),
+                metadata={
+                    "cash_balances": (
+                        {
+                            "account_id": "U123",
+                            "currency": "USD",
+                            "AvailableFunds": 700.0,
+                            "NetLiquidation": 1_000.0,
+                        },
+                    ),
+                    "option_positions": (),
+                },
+            ),
+            market_currency="USD",
+            cash_only_execution=True,
+        )
+
+
 def test_missing_read_only_order_surface_fails_closed() -> None:
     class MissingOpenOrderReader(_IB):
         reqAllOpenOrders = None
