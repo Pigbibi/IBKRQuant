@@ -39,6 +39,18 @@ _EXPECTED_DIGEST_KEYS = (
     "local_execution_ledger_sha256",
 )
 
+# These are actual cash-balance tags, in the same order as the execution
+# snapshot's cash selector.  Margin capacity and mark-to-market account tags
+# (for example AvailableFunds and NetLiquidation) must never enter a recovery
+# digest: they legitimately move while no cash, order, or position changes.
+_CASH_BALANCE_TAG_PRIORITY = (
+    "$LEDGER-CashBalance",
+    "$LEDGER-TotalCashBalance",
+    "CashBalance",
+    "TotalCashBalance",
+    "SettledCash",
+)
+
 
 def _text(value: object) -> str:
     return str(value or "").strip()
@@ -125,11 +137,16 @@ def _normalise_cash_balance(value: Mapping[str, object], *, selected_account_ids
         for tag, number in value.items()
         if _text(tag) not in {"account_id", "currency"}
     }
-    return {
-        "account": account_id,
-        "currency": _text(value.get("currency")).upper(),
-        "tags": dict(sorted(numeric_tags.items())),
-    }
+    for tag in _CASH_BALANCE_TAG_PRIORITY:
+        if tag in numeric_tags:
+            return {
+                "account": account_id,
+                "currency": _text(value.get("currency")).upper(),
+                "tags": {tag: numeric_tags[tag]},
+            }
+    raise IBKRReconciliationReadError(
+        "IBKR reconciliation is missing a stable cash-balance tag."
+    )
 
 
 def _open_trade_account(trade: Any) -> object:
