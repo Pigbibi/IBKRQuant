@@ -1,0 +1,90 @@
+name: Collect IBKR Reconciliation Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Frozen live target to read; this workflow has no order path."
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - soxl_soxx_trend_income
+          - tqqq_growth_income
+          - global_etf_rotation
+          - russell_top50_leader_rotation
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: interactivebrokersquant
+  GCP_REGION: us-central1
+  GCP_WORKLOAD_IDENTITY_PROVIDER: projects/303168642265/locations/global/workloadIdentityPools/github-actions/providers/github-main
+  GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT: ibkr-platform-deploy@interactivebrokersquant.iam.gserviceaccount.com
+
+concurrency:
+  group: ibkr-reconciliation-evidence-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    name: Read ${{ matrix.profile }} baseline evidence
+    if: ${{ inputs.target == 'all' || inputs.target == matrix.profile }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: soxl_soxx_trend_income
+            service: interactive-brokers-quant-live-u15998061-service
+          - profile: tqqq_growth_income
+            service: interactive-brokers-quant-live-u16608560-service
+          - profile: global_etf_rotation
+            service: interactive-brokers-quant-live-u18308207-service
+          - profile: russell_top50_leader_rotation
+            service: interactive-brokers-quant-live-u18336562-service
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Collect no-order reconciliation candidate
+        env:
+          SERVICE: ${{ matrix.service }}
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          set -euo pipefail
+          service_url="$(gcloud run services describe "$SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.url)')"
+          test -n "$service_url"
+          identity_token="$(gcloud auth print-identity-token --audiences="$service_url")"
+          mkdir -p reports
+          curl --fail --silent --show-error --max-time 90 \
+            --request POST \
+            --header "Authorization: Bearer ${identity_token}" \
+            --output "reports/${PROFILE}.json" \
+            "${service_url}/reconcile"
+          jq -e --arg profile "$PROFILE" '
+            .schema_version == "ibkr_reconciliation_candidate.v1"
+            and .evidence.platform_id == "ibkr"
+            and .evidence.strategy_profile == $profile
+            and (.recovery_blockers | type == "array")
+          ' "reports/${PROFILE}.json" >/dev/null
+          jq -r '[.permits_active_lkg, .expected_digests_configured, (.recovery_blockers | length)] | @tsv' \
+            "reports/${PROFILE}.json" | awk -F '\t' '{print "candidate_collected permits_active_lkg=" $1 ", expected_digests_configured=" $2 ", blockers=" $3}'
+
+      - name: Retain redacted candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ibkr-reconciliation-${{ matrix.profile }}-${{ github.run_id }}
+          path: reports/${{ matrix.profile }}.json
+          if-no-files-found: error
+          retention-days: 30

@@ -87,3 +87,14 @@ URI、部署 Cloud Run、连接券商或提交订单。实际启用仍需要单�
 令牌被试图发送到普通管理站路径。每一种情况都必须抛出拒绝或返回没有
 `transition_plan` 的结果；测试同时断言 `state_write_attempted=false`。这让后续接入
 最小权限 CAS 时能持续证明“异常只能保持冻结，不能意外恢复实盘”。
+
+## 收集两份候选收据
+
+`Collect IBKR Reconciliation Evidence` 是显式手动工作流。它仅以部署身份调用每个
+冻结 Cloud Run 服务的 `POST /reconcile`，并在 30 天内保留脱敏
+`ibkr_reconciliation_candidate.v1` artifact。它不调用 `/run`、不修改 GitHub 变量、
+不发布状态账本，也不发送任何订单。
+
+同一目标至少应在相隔一分钟的两次手动运行中得到候选，才能交给
+`build_reconciliation_baseline_candidate.py`。工作流的成功只说明读取和收据格式正常；
+候选仍可能因为未配置预期摘要或账本差异而正确保持阻断。
