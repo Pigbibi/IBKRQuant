@@ -24,6 +24,7 @@ env:
   GCP_REGION: us-central1
   GCP_WORKLOAD_IDENTITY_PROVIDER: projects/303168642265/locations/global/workloadIdentityPools/github-actions/providers/github-main
   GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT: ibkr-platform-deploy@interactivebrokersquant.iam.gserviceaccount.com
+  GCP_SCHEDULER_SERVICE_ACCOUNT: ibkr-platform-scheduler@interactivebrokersquant.iam.gserviceaccount.com
 
 concurrency:
   group: ibkr-reconciliation-evidence-${{ inputs.target }}
@@ -82,49 +83,104 @@ jobs:
           test -n "$service_url"
           echo "service_url=$service_url" >> "$GITHUB_OUTPUT"
 
-      - name: Mint short-lived Cloud Run token
-        id: cloud_run_token
-        if: ${{ steps.selection.outputs.selected == 'true' }}
-        uses: google-github-actions/auth@v3
-        with:
-          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT }}
-          token_format: id_token
-          id_token_audience: ${{ steps.audience.outputs.service_url }}
-          create_credentials_file: false
-          export_environment_variables: false
-          request_reason: read-only IBKR reconciliation evidence collection
-
-      - name: Collect no-order reconciliation candidate
+      - name: Create and run internal reconciliation request
+        id: scheduler
         if: ${{ steps.selection.outputs.selected == 'true' }}
         env:
           PROFILE: ${{ matrix.profile }}
           SERVICE_URL: ${{ steps.audience.outputs.service_url }}
-          IDENTITY_TOKEN: ${{ steps.cloud_run_token.outputs.id_token }}
         run: |
           set -euo pipefail
           test -n "$SERVICE_URL"
-          test -n "$IDENTITY_TOKEN"
+          job_name="ibkr-reconcile-${PROFILE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          requested_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if gcloud scheduler jobs describe "$job_name" --project "$GCP_PROJECT_ID" --location "$GCP_REGION" >/dev/null 2>&1; then
+            echo "Refusing to replace an existing reconciliation job: $job_name" >&2
+            exit 1
+          fi
+          gcloud scheduler jobs create http "$job_name" \
+            --project "$GCP_PROJECT_ID" \
+            --location "$GCP_REGION" \
+            --schedule '0 0 1 1 *' \
+            --time-zone 'Etc/UTC' \
+            --uri "${SERVICE_URL}/reconcile" \
+            --http-method POST \
+            --oidc-service-account-email "$GCP_SCHEDULER_SERVICE_ACCOUNT" \
+            --oidc-token-audience "$SERVICE_URL" \
+            --attempt-deadline '300s' \
+            --quiet >/dev/null
+          {
+            echo "job_name=$job_name"
+            echo "requested_at=$requested_at"
+          } >> "$GITHUB_OUTPUT"
+          gcloud scheduler jobs run "$job_name" --project "$GCP_PROJECT_ID" --location "$GCP_REGION"
+
+      - name: Read private no-order reconciliation candidate
+        if: ${{ steps.selection.outputs.selected == 'true' }}
+        env:
+          PROFILE: ${{ matrix.profile }}
+          SERVICE: ${{ matrix.service }}
+          SERVICE_URL: ${{ steps.audience.outputs.service_url }}
+          REQUESTED_AT: ${{ steps.scheduler.outputs.requested_at }}
+        run: |
+          set -euo pipefail
+          test -n "$SERVICE_URL"
+          test -n "$REQUESTED_AT"
           mkdir -p reports
-          curl --fail --silent --show-error --max-time 90 \
-            --request POST \
-            --header "Authorization: Bearer ${IDENTITY_TOKEN}" \
-            --output "reports/${PROFILE}.json" \
-            "${SERVICE_URL}/reconcile"
+          report_uri=''
+          for attempt in $(seq 1 60); do
+            report_uri="$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND timestamp>=\"${REQUESTED_AT}\" AND textPayload:\"execution_report gs://\"" --project "$GCP_PROJECT_ID" --freshness=15m --limit=10 --format='value(textPayload)' 2>/dev/null | awk '$1 == "execution_report" {print $2; exit}')"
+            if [ -n "$report_uri" ]; then
+              break
+            fi
+            sleep 5
+          done
+          if [ -z "$report_uri" ]; then
+            echo "Timed out waiting for the private reconciliation report." >&2
+            exit 1
+          fi
+          gcloud storage cat "$report_uri" | jq --arg profile "$PROFILE" '
+            .diagnostics.broker_reconciliation as $candidate
+            | {
+                schema_version: "ibkr_reconciliation_artifact.v1",
+                strategy_profile: $profile,
+                report_status: .status,
+                reconciliation: $candidate,
+                errors: [
+                  .errors[]? | {
+                    stage,
+                    error_type,
+                    failure_category
+                  }
+                ]
+              }
+          ' > "reports/${PROFILE}.json"
           jq -e --arg profile "$PROFILE" '
-            .schema_version == "ibkr_reconciliation_candidate.v1"
-            and .evidence.platform_id == "ibkr"
-            and .evidence.strategy_profile == $profile
-            and (.recovery_blockers | type == "array")
+            .schema_version == "ibkr_reconciliation_artifact.v1"
+            and .strategy_profile == $profile
+            and .reconciliation.schema_version == "ibkr_reconciliation_candidate.v1"
+            and .reconciliation.evidence.platform_id == "ibkr"
+            and .reconciliation.evidence.strategy_profile == $profile
+            and (.reconciliation.recovery_blockers | type == "array")
           ' "reports/${PROFILE}.json" >/dev/null
-          jq -r '[.permits_active_lkg, .expected_digests_configured, (.recovery_blockers | length)] | @tsv' \
+          jq -r '[.reconciliation.permits_active_lkg, .reconciliation.expected_digests_configured, (.reconciliation.recovery_blockers | length)] | @tsv' \
             "reports/${PROFILE}.json" | awk -F '\t' '{print "candidate_collected permits_active_lkg=" $1 ", expected_digests_configured=" $2 ", blockers=" $3}'
 
+      - name: Delete temporary internal reconciliation job
+        if: ${{ always() && steps.selection.outputs.selected == 'true' }}
+        env:
+          SCHEDULER_JOB: ${{ steps.scheduler.outputs.job_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SCHEDULER_JOB" ]; then
+            gcloud scheduler jobs delete "$SCHEDULER_JOB" --project "$GCP_PROJECT_ID" --location "$GCP_REGION" --quiet
+          fi
+
       - name: Retain redacted candidate
-        if: ${{ steps.selection.outputs.selected == 'true' }}
+        if: ${{ always() && steps.selection.outputs.selected == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ibkr-reconciliation-${{ matrix.profile }}-${{ github.run_id }}
           path: reports/${{ matrix.profile }}.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
