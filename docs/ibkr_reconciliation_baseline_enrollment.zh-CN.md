@@ -97,6 +97,10 @@ Scheduler 任务，再由既有的最小权限 Scheduler 身份调用冻结服�
 成功或失败时删除该一次性任务。它不调用 `/run`、不修改 GitHub 变量、不发布状态账本，也
 不发送任何订单。
 
+工作流 artifact 的外层是 `ibkr_reconciliation_artifact.v1`，内部仅保留同一份
+`broker_reconciliation` 摘要；`build_reconciliation_baseline_candidate.py` 可直接消费它。
+这样基线审核不必下载包含其他运行诊断的完整私有报告。
+
 同一目标至少应在相隔一分钟的两次手动运行中得到候选，才能交给
 `build_reconciliation_baseline_candidate.py`。工作流的成功只说明读取和收据格式正常；
 候选仍可能因为未配置预期摘要或账本差异而正确保持阻断。

@@ -85,6 +85,19 @@ def test_accepts_persisted_runtime_report_shape() -> None:
     assert evidence.platform_id == "ibkr"
 
 
+def test_accepts_redacted_workflow_artifact_shape() -> None:
+    start = datetime(2026, 8, 30, 8, 0, tzinfo=timezone.utc)
+    payload = {
+        "schema_version": "ibkr_reconciliation_artifact.v1",
+        "strategy_profile": "soxl_soxx_trend_income",
+        "reconciliation": _payload(observed_at=start),
+    }
+
+    evidence = extract_reconciliation_evidence(payload)
+
+    assert evidence.platform_id == "ibkr"
+
+
 def test_missing_redacted_evidence_is_rejected() -> None:
     with pytest.raises(ValueError, match="does not contain"):
         extract_reconciliation_evidence({"diagnostics": {}})

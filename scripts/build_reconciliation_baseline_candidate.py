@@ -33,6 +33,12 @@ def extract_reconciliation_evidence(payload: Mapping[str, Any]) -> BrokerReconci
         nested = diagnostics.get("broker_reconciliation")
         if isinstance(nested, Mapping):
             candidate = nested
+    # The manual evidence workflow stores only this safe candidate beneath a
+    # small artifact envelope.  Accept that envelope too, so enrollment never
+    # needs the broader private execution report as an input.
+    reconciliation = payload.get("reconciliation")
+    if isinstance(reconciliation, Mapping):
+        candidate = reconciliation
     evidence = candidate.get("evidence") if isinstance(candidate, Mapping) else None
     if not isinstance(evidence, Mapping):
         raise ValueError("receipt does not contain broker_reconciliation evidence")
