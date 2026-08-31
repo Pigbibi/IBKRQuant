@@ -34,7 +34,7 @@ jobs:
   collect:
     name: Read ${{ matrix.profile }} baseline evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -83,7 +83,7 @@ jobs:
           test -n "$service_url"
           echo "service_url=$service_url" >> "$GITHUB_OUTPUT"
 
-      - name: Create and run internal reconciliation request
+      - name: Schedule one-shot internal reconciliation request
         id: scheduler
         if: ${{ steps.selection.outputs.selected == 'true' }}
         env:
@@ -94,6 +94,17 @@ jobs:
           test -n "$SERVICE_URL"
           job_name="ibkr-reconcile-${PROFILE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           requested_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          case "$PROFILE" in
+            soxl_soxx_trend_income) delay_minutes=3 ;;
+            tqqq_growth_income) delay_minutes=5 ;;
+            global_etf_rotation) delay_minutes=7 ;;
+            russell_top50_leader_rotation) delay_minutes=9 ;;
+            *)
+              echo "Unsupported reconciliation profile: $PROFILE" >&2
+              exit 1
+              ;;
+          esac
+          schedule="$(date -u -d "+${delay_minutes} minutes" '+%M %H %d %m *')"
           if gcloud scheduler jobs describe "$job_name" --project "$GCP_PROJECT_ID" --location "$GCP_REGION" >/dev/null 2>&1; then
             echo "Refusing to replace an existing reconciliation job: $job_name" >&2
             exit 1
@@ -101,7 +112,7 @@ jobs:
           gcloud scheduler jobs create http "$job_name" \
             --project "$GCP_PROJECT_ID" \
             --location "$GCP_REGION" \
-            --schedule '0 0 1 1 *' \
+            --schedule "$schedule" \
             --time-zone 'Etc/UTC' \
             --uri "${SERVICE_URL}/reconcile" \
             --http-method POST \
@@ -113,7 +124,6 @@ jobs:
             echo "job_name=$job_name"
             echo "requested_at=$requested_at"
           } >> "$GITHUB_OUTPUT"
-          gcloud scheduler jobs run "$job_name" --project "$GCP_PROJECT_ID" --location "$GCP_REGION"
 
       - name: Read private no-order reconciliation candidate
         if: ${{ steps.selection.outputs.selected == 'true' }}
@@ -128,7 +138,7 @@ jobs:
           test -n "$REQUESTED_AT"
           mkdir -p reports
           report_uri=''
-          for attempt in $(seq 1 60); do
+          for attempt in $(seq 1 96); do
             report_uri="$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND timestamp>=\"${REQUESTED_AT}\" AND textPayload:\"execution_report gs://\"" --project "$GCP_PROJECT_ID" --freshness=15m --limit=10 --format='value(textPayload)' 2>/dev/null | awk '$1 == "execution_report" {print $2; exit}')"
             if [ -n "$report_uri" ]; then
               break
