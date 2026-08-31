@@ -91,8 +91,8 @@ URI、部署 Cloud Run、连接券商或提交订单。实际启用仍需要单�
 ## 收集两份候选收据
 
 `Collect IBKR Reconciliation Evidence` 是显式手动工作流。由于这些 Cloud Run 服务只接受
-内部入口，工作流会以部署身份创建一个名称绑定到本次运行的**一次性** Cloud Scheduler
-任务，再由既有的最小权限 Scheduler 身份调用冻结服务的 `POST /reconcile`。它随后只从
+内部入口，工作流会以部署身份创建一个名称绑定到本次运行、几分钟后只执行一次的 Cloud
+Scheduler 任务，再由既有的最小权限 Scheduler 身份调用冻结服务的 `POST /reconcile`。它随后只从
 私有运行报告提取脱敏 `ibkr_reconciliation_candidate.v1`，在 30 天内保留 artifact，并在
 成功或失败时删除该一次性任务。它不调用 `/run`、不修改 GitHub 变量、不发布状态账本，也
 不发送任何订单。
