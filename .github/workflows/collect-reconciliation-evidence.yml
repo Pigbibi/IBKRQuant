@@ -32,7 +32,6 @@ concurrency:
 jobs:
   collect:
     name: Read ${{ matrix.profile }} baseline evidence
-    if: ${{ inputs.target == 'all' || inputs.target == matrix.profile }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -48,16 +47,32 @@ jobs:
           - profile: russell_top50_leader_rotation
             service: interactive-brokers-quant-live-u18336562-service
     steps:
+      - name: Select requested target
+        id: selection
+        env:
+          REQUESTED_TARGET: ${{ inputs.target }}
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          set -euo pipefail
+          if [ "$REQUESTED_TARGET" = "all" ] || [ "$REQUESTED_TARGET" = "$PROFILE" ]; then
+            echo "selected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Authenticate to Google Cloud
+        if: ${{ steps.selection.outputs.selected == 'true' }}
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ env.GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
+        if: ${{ steps.selection.outputs.selected == 'true' }}
         uses: google-github-actions/setup-gcloud@v3
 
       - name: Collect no-order reconciliation candidate
+        if: ${{ steps.selection.outputs.selected == 'true' }}
         env:
           SERVICE: ${{ matrix.service }}
           PROFILE: ${{ matrix.profile }}
@@ -82,6 +97,7 @@ jobs:
             "reports/${PROFILE}.json" | awk -F '\t' '{print "candidate_collected permits_active_lkg=" $1 ", expected_digests_configured=" $2 ", blockers=" $3}'
 
       - name: Retain redacted candidate
+        if: ${{ steps.selection.outputs.selected == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ibkr-reconciliation-${{ matrix.profile }}-${{ github.run_id }}
