@@ -71,22 +71,46 @@ jobs:
         if: ${{ steps.selection.outputs.selected == 'true' }}
         uses: google-github-actions/setup-gcloud@v3
 
-      - name: Collect no-order reconciliation candidate
+      - name: Resolve Cloud Run audience
+        id: audience
         if: ${{ steps.selection.outputs.selected == 'true' }}
         env:
           SERVICE: ${{ matrix.service }}
-          PROFILE: ${{ matrix.profile }}
         run: |
           set -euo pipefail
           service_url="$(gcloud run services describe "$SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.url)')"
           test -n "$service_url"
-          identity_token="$(gcloud auth print-identity-token --audiences="$service_url")"
+          echo "service_url=$service_url" >> "$GITHUB_OUTPUT"
+
+      - name: Mint short-lived Cloud Run token
+        id: cloud_run_token
+        if: ${{ steps.selection.outputs.selected == 'true' }}
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT }}
+          token_format: id_token
+          id_token_audience: ${{ steps.audience.outputs.service_url }}
+          create_credentials_file: false
+          export_environment_variables: false
+          request_reason: read-only IBKR reconciliation evidence collection
+
+      - name: Collect no-order reconciliation candidate
+        if: ${{ steps.selection.outputs.selected == 'true' }}
+        env:
+          PROFILE: ${{ matrix.profile }}
+          SERVICE_URL: ${{ steps.audience.outputs.service_url }}
+          IDENTITY_TOKEN: ${{ steps.cloud_run_token.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          test -n "$SERVICE_URL"
+          test -n "$IDENTITY_TOKEN"
           mkdir -p reports
           curl --fail --silent --show-error --max-time 90 \
             --request POST \
-            --header "Authorization: Bearer ${identity_token}" \
+            --header "Authorization: Bearer ${IDENTITY_TOKEN}" \
             --output "reports/${PROFILE}.json" \
-            "${service_url}/reconcile"
+            "${SERVICE_URL}/reconcile"
           jq -e --arg profile "$PROFILE" '
             .schema_version == "ibkr_reconciliation_candidate.v1"
             and .evidence.platform_id == "ibkr"
