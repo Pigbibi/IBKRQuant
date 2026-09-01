@@ -13,10 +13,11 @@ def route_methods(strategy_module):
 
 def test_cloud_run_route_contracts_are_registered(strategy_module):
     assert route_methods(strategy_module) == {
-        "/run": ["GET", "POST"],
+        "/run": ["POST"],
         "/dry-run": ["GET", "POST"],
         "/paper-command-consumer": ["POST"],
-        "/probe": ["GET", "POST"],
+        "/probe": ["POST"],
+        "/reconcile": ["POST"],
         "/monitor-dispatch": ["GET", "POST"],
         "/health": ["GET"],
         "/healthz": ["GET"],
@@ -121,17 +122,33 @@ def test_platform_notification_prefix_uses_ibkr_account_scope(strategy_module_fa
     assert module._with_platform_notification_prefix("hello") == "[U1234567] hello"
 
 
-def test_handle_request_get_returns_safe_message(strategy_module, monkeypatch):
+def test_handle_request_get_is_method_not_allowed(strategy_module, monkeypatch):
     def fail_if_called():
         raise AssertionError("GET should not execute strategy")
 
     monkeypatch.setattr(strategy_module, "run_strategy_core", fail_if_called)
 
+    response = strategy_module.app.test_client().get("/run")
     with strategy_module.app.test_request_context("/run", method="GET"):
         body, status = strategy_module.handle_request()
 
-    assert status == 200
-    assert body == "OK - use POST to execute strategy"
+    assert response.status_code == 405
+    assert (body, status) == ("Method Not Allowed", 405)
+
+
+def test_handle_probe_get_is_method_not_allowed(strategy_module, monkeypatch):
+    monkeypatch.setattr(
+        strategy_module,
+        "_handle_probe",
+        lambda: (_ for _ in ()).throw(AssertionError("GET should not connect to the broker")),
+    )
+
+    response = strategy_module.app.test_client().get("/probe")
+    with strategy_module.app.test_request_context("/probe", method="GET"):
+        body, status = strategy_module.handle_probe()
+
+    assert response.status_code == 405
+    assert (body, status) == ("Method Not Allowed", 405)
 
 
 def test_handle_request_post_executes_on_market_day(strategy_module, monkeypatch):
@@ -143,6 +160,7 @@ def test_handle_request_post_executes_on_market_day(strategy_module, monkeypatch
 
     monkeypatch.setattr(strategy_module, "is_market_open_now", lambda **_kwargs: True)
     monkeypatch.setattr(strategy_module, "run_strategy_core", fake_run_strategy_core)
+    monkeypatch.setattr(strategy_module, "attach_cycle_execution_receipt", lambda *_args, **_kwargs: None)
 
     with strategy_module.app.test_request_context("/run", method="POST"):
         body, status = strategy_module.handle_request()

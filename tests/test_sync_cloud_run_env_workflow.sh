@@ -133,6 +133,7 @@ grep -Fq -- '--remove-secrets "$(IFS=,; echo "${remove_secret_vars[*]}")' "$work
 grep -Fq -- '--update-secrets "$(IFS=,; echo "${secret_pairs[*]}")' "$workflow_file"
 grep -Fq -- '--concurrency 1' "$workflow_file"
 grep -Fq -- '--max-instances 1' "$workflow_file"
+grep -Fq -- '--no-allow-unauthenticated' "$workflow_file"
 grep -Fq -- '--remove-env-vars "$(IFS=,; echo "${remove_env_vars[*]}")' "$workflow_file"
 grep -Fq -- '--update-env-vars "^|^$(join_by_delimiter "|" "${env_pairs[@]}")' "$workflow_file"
 grep -Fq -- '--update-labels "$(IFS=,; echo "${target_label_pairs[*]}")' "$workflow_file"
