@@ -14,6 +14,12 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from quant_platform_kit.common.operational_notification_localization import (
+    format_operational_alert,
+    operational_notification_text,
+    resolve_operational_notification_locale,
+)
+
 
 ERROR_SEVERITIES = {"ERROR", "CRITICAL", "ALERT", "EMERGENCY"}
 FAILURE_WORDS = (
@@ -58,6 +64,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if not value:
         return default
     return value in {"1", "true", "yes", "y", "on"}
+
+
+def _notification_locale() -> str:
+    return resolve_operational_notification_locale(os.environ.get("NOTIFY_LANG"))
+
+
+def _notice(key: str, /, **values: object) -> str:
+    return operational_notification_text(_notification_locale(), key, **values)
 
 
 def _load_services() -> list[str]:
@@ -669,7 +683,8 @@ def main() -> int:
         services = _load_services()
     except RuntimeError as exc:
         services = []
-        issues.append(f"service configuration error: {exc}")
+        issues.append(_notice("runtime_guard_service_configuration_error"))
+        details.append(f"service configuration error: {exc}")
     scheduler_pattern = (
         os.environ.get("RUNTIME_GUARD_SCHEDULER_JOB_PATTERN")
         or _scheduler_job_pattern_for_services(services)
@@ -683,7 +698,8 @@ def main() -> int:
         try:
             entries = _run_gcloud_logging(project, log_filter, limit)
         except RuntimeError as exc:
-            issues.append(f"Cloud Run log query failed for {service}: {exc}")
+            issues.append(_notice("runtime_guard_cloud_run_log_query_failed", service=service))
+            details.append(f"Cloud Run log query failed for {service}: {exc}")
             continue
         queried_services.add(service)
         failures = [entry for entry in entries if _is_failure(entry)]
@@ -692,7 +708,13 @@ def main() -> int:
         success_count_by_service[service] = service_success_count
         success_count += service_success_count
         if failures:
-            issues.append(f"{len(failures)} Cloud Run failure log(s) for {service}")
+            issues.append(
+                _notice(
+                    "runtime_guard_cloud_run_failure_logs",
+                    count=len(failures),
+                    service=service,
+                )
+            )
             details.extend(_summarize(entry) for entry in failures[:5])
 
     if services and require_success:
@@ -702,8 +724,11 @@ def main() -> int:
             queried_services,
         ):
             issues.append(
-                f"no successful Cloud Run request found for {service} "
-                f"in the last {lookback_minutes} minutes"
+                _notice(
+                    "runtime_guard_no_successful_request",
+                    service=service,
+                    lookback_minutes=lookback_minutes,
+                )
             )
 
     if check_scheduler and scheduler_pattern:
@@ -732,10 +757,16 @@ def main() -> int:
                     continue
                 failures.append(entry)
             if failures:
-                issues.append(f"{len(failures)} Cloud Scheduler failure log(s)")
+                issues.append(
+                    _notice(
+                        "runtime_guard_scheduler_failure_logs",
+                        count=len(failures),
+                    )
+                )
                 details.extend(_summarize(entry) for entry in failures[:5])
         except RuntimeError as exc:
-            issues.append(f"Cloud Scheduler log query failed: {exc}")
+            issues.append(_notice("runtime_guard_scheduler_log_query_failed"))
+            details.append(f"Cloud Scheduler log query failed: {exc}")
     elif check_scheduler:
         print("Skipping Cloud Scheduler check because no scheduler job pattern could be derived.", file=sys.stderr)
 
@@ -752,18 +783,15 @@ def main() -> int:
             f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
             f"/actions/runs/{os.environ['GITHUB_RUN_ID']}"
         )
-    message_lines = [
-        f"[Runtime Guard] {name}",
-        f"Project: {project}",
-        f"Lookback: {lookback_minutes} minutes",
-        "Issues:",
-        *[f"- {issue}" for issue in issues],
-    ]
-    if details:
-        message_lines.extend(["Details:", *details[:10]])
-    if run_url:
-        message_lines.append(f"Workflow: {run_url}")
-    message = "\n".join(message_lines)
+    message = format_operational_alert(
+        locale=_notification_locale(),
+        alert_type="runtime_guard",
+        name=name,
+        context={"project": project, "lookback_minutes": lookback_minutes},
+        issues=issues,
+        technical_details=details[:10],
+        workflow_url=run_url,
+    )
     print(message)
     _send_telegram(message[:3900])
     return 1 if fail_workflow else 0

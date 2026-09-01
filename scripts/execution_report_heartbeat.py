@@ -14,6 +14,12 @@ import urllib.request
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from quant_platform_kit.common.operational_notification_localization import (
+    format_operational_alert,
+    operational_notification_text,
+    resolve_operational_notification_locale,
+)
+
 try:
     from scripts.runtime_heartbeat_policy import (
         filter_due_targets,
@@ -74,6 +80,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if not value:
         return default
     return value in {"1", "true", "yes", "y", "on"}
+
+
+def _notification_locale() -> str:
+    return resolve_operational_notification_locale(os.environ.get("NOTIFY_LANG"))
+
+
+def _notice(key: str, /, **values: object) -> str:
+    return operational_notification_text(_notification_locale(), key, **values)
 
 
 def _enabled_value(value: Any, *, default: bool = True) -> bool:
@@ -1035,7 +1049,14 @@ def main(now: dt.datetime | None = None) -> int:
             project=project,
         )
     except RuntimeError as exc:
-        message = f"[Execution Report Heartbeat] {name}\nScheduler policy error: {exc}"
+        message = format_operational_alert(
+            locale=_notification_locale(),
+            alert_type="execution_report_heartbeat",
+            name=name,
+            context={"lookback_hours": lookback_hours},
+            issues=[_notice("heartbeat_scheduler_policy_error")],
+            technical_details=[str(exc)],
+        )
         print(message)
         _send_telegram(message)
         return 1 if fail_workflow else 0
@@ -1173,18 +1194,27 @@ def main(now: dt.datetime | None = None) -> int:
         return 0
 
     issues = []
+    technical_details = []
     if list_errors:
-        issues.extend(f"list failed: {item}" for item in list_errors[:3])
+        issues.append(_notice("heartbeat_list_failed"))
+        technical_details.extend(list_errors[:3])
     if not sorted_objects:
-        issues.append(f"no report object updated in the last {lookback_hours:g} hours")
+        issues.append(_notice("heartbeat_no_recent_report", lookback_hours=f"{lookback_hours:g}"))
     elif required_keys:
         missing = [key for key in required_keys if key not in accepted_by_service]
         issues.append(
-            "missing acceptable report for runtime target(s): "
-            + ", ".join(required_labels[key] for key in missing)
+            _notice(
+                "heartbeat_missing_acceptable_report",
+                targets=", ".join(required_labels[key] for key in missing),
+            )
         )
     else:
-        issues.append(f"no acceptable report among {min(len(sorted_objects), max_reports)} recent report object(s)")
+        issues.append(
+            _notice(
+                "heartbeat_no_acceptable_report",
+                count=min(len(sorted_objects), max_reports),
+            )
+        )
 
     run_url = ""
     if os.environ.get("GITHUB_SERVER_URL") and os.environ.get("GITHUB_REPOSITORY") and os.environ.get("GITHUB_RUN_ID"):
@@ -1192,17 +1222,16 @@ def main(now: dt.datetime | None = None) -> int:
             f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
             f"/actions/runs/{os.environ['GITHUB_RUN_ID']}"
         )
-    message_lines = [
-        f"[Execution Report Heartbeat] {name}",
-        f"Lookback: {lookback_hours:g} hours",
-        "Issues:",
-        *[f"- {issue}" for issue in issues],
-    ]
-    if inspected:
-        message_lines.extend(["Recent reports:", *inspected[:max_reports]])
-    if run_url:
-        message_lines.append(f"Workflow: {run_url}")
-    message = "\n".join(message_lines)
+    message = format_operational_alert(
+        locale=_notification_locale(),
+        alert_type="execution_report_heartbeat",
+        name=name,
+        context={"lookback_hours": f"{lookback_hours:g}"},
+        issues=issues,
+        recent_reports=inspected[:max_reports],
+        technical_details=technical_details,
+        workflow_url=run_url,
+    )
     print(message)
     _send_telegram(message[:3900])
     return 1 if fail_workflow else 0
