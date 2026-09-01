@@ -1027,7 +1027,7 @@ jobs:
                           str(scheduler.get("main_time") or configured_time("CLOUD_SCHEDULER_MAIN_TIME", "45 15 * * 1-5")),
                           str(scheduler.get("probe_time") or configured_time("CLOUD_SCHEDULER_PROBE_TIME", "35 9,15 * * 1-5")),
                           str(scheduler.get("precheck_time") or configured_time("CLOUD_SCHEDULER_PRECHECK_TIME", "45 9 * * 1-5")),
-                          str(env.get("RUNTIME_TARGET_ENABLED", "true")).strip().lower() or "true",
+                          str(bool(target.get("standard_execution_enabled", False))).lower(),
                           str(scheduler.get("attempt_deadline") or ""),
                       ]
                   )
@@ -1036,7 +1036,7 @@ jobs:
           )
 
           for update in "${scheduler_updates[@]}"; do
-            IFS=$'\t' read -r cloud_run_service market_timezone main_time warmup_time precheck_time runtime_target_enabled main_attempt_deadline <<< "${update}"
+            IFS=$'\t' read -r cloud_run_service market_timezone main_time warmup_time precheck_time standard_execution_enabled main_attempt_deadline <<< "${update}"
             if [ -z "${cloud_run_service}" ] || [ -z "${market_timezone}" ]; then
               continue
             fi
@@ -1255,10 +1255,10 @@ jobs:
                 --project="${GCP_PROJECT_ID}" \
                 --location="${scheduler_location}" \
                 --format='value(state)')"
-              case "${runtime_target_enabled}" in
+              case "${standard_execution_enabled}" in
                 1|true|yes|on)
                   if [ "${managed_job_state}" = "PAUSED" ]; then
-                    echo "Resuming Cloud Scheduler job ${managed_job_name} because ${cloud_run_service} is enabled."
+                    echo "Resuming Cloud Scheduler job ${managed_job_name} because ${cloud_run_service} permits standard execution."
                     gcloud scheduler jobs resume "${managed_job_name}" \
                       --project="${GCP_PROJECT_ID}" \
                       --location="${scheduler_location}" \
@@ -1267,7 +1267,7 @@ jobs:
                   ;;
                 *)
                   if [ "${managed_job_state}" != "PAUSED" ]; then
-                    echo "Pausing Cloud Scheduler job ${managed_job_name} because ${cloud_run_service} is disabled."
+                    echo "Pausing Cloud Scheduler job ${managed_job_name} because ${cloud_run_service} does not permit standard execution."
                     gcloud scheduler jobs pause "${managed_job_name}" \
                       --project="${GCP_PROJECT_ID}" \
                       --location="${scheduler_location}" \

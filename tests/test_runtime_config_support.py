@@ -1376,6 +1376,27 @@ def test_build_cloud_run_env_sync_plan_generates_live_gateway_deadlines() -> Non
     assert "attempt_deadline" not in by_service["interactive-brokers-us-combo-shadow-service"]["scheduler"]
 
 
+def test_build_cloud_run_env_sync_plan_pauses_reconcile_only_execution_schedule() -> None:
+    payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
+    protected = payload["targets"][0]
+    protected["runtime_target"]["live_continuity"] = {"state": "RECONCILE_ONLY"}
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_PLAN_SCRIPT_PATH), "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(payload)},
+    )
+
+    plan = json.loads(result.stdout)
+    by_service = {target["service_name"]: target for target in plan["targets"]}
+    assert by_service[protected["service"]]["standard_execution_enabled"] is False
+    assert by_service["interactive-brokers-quant-live-u16608560-service"][
+        "standard_execution_enabled"
+    ] is True
+
+
 def test_build_cloud_run_env_sync_plan_does_not_enable_live_dedup_implicitly() -> None:
     payload = _four_gateway_warmup_payload("43 9,15 * * 1-5")
     result = subprocess.run(
