@@ -57,6 +57,9 @@ from runtime_config_support import (  # noqa: E402
     DEFAULT_MARKET_TIMEZONE,
     resolve_market,
 )
+from scripts.runtime_heartbeat_policy import (  # noqa: E402
+    runtime_target_permits_standard_execution,
+)
 from scripts.reconciliation_recovery_state_ledger import (  # noqa: E402
     apply_recovery_state_ledger_from_env,
 )
@@ -577,6 +580,12 @@ def _build_target_plan(
         "strategy_profile": canonical_profile,
         "env": env_values,
         "scheduler": scheduler,
+        # Scheduler admission must use the same continuity boundary as the
+        # runtime and execution-report heartbeat.  An enabled service in a
+        # reconciliation-only state is intentionally deployable, but it must
+        # not receive normal execution schedules.
+        "standard_execution_enabled": _runtime_target_enabled(env_values)
+        and runtime_target_permits_standard_execution(runtime_target),
         "remove_env_vars": sorted(set(remove_env_vars) - set(env_values)),
         "_recovery_state_ledger_applied": recovery_expected_digests is not None,
     }
