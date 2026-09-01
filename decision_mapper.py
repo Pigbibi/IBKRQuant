@@ -148,6 +148,14 @@ def map_strategy_decision(
         diagnostics["consecutive_losses"] = int(runtime_metadata["consecutive_losses"])
     risk_flags = tuple(str(flag) for flag in decision.risk_flags)
     no_execute = bool(_NO_EXECUTE_FLAGS & set(risk_flags))
+    if not no_execute and not decision.positions:
+        # An empty position set is not a safe implicit liquidation instruction.
+        # It can result from a degraded strategy plug-in or missing inputs, so
+        # keep the existing book unchanged until a strategy explicitly emits a
+        # releasable allocation.
+        no_execute = True
+        risk_flags = tuple(dict.fromkeys((*risk_flags, "no_execute")))
+        diagnostics.setdefault("execution_blocked_reason", "empty_position_decision")
     total_equity_value = runtime_metadata.get("portfolio_total_equity")
     cash_only_execution = bool(runtime_metadata.get("cash_only_execution", True))
     if not no_execute and total_equity_value is not None:

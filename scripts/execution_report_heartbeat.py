@@ -22,6 +22,7 @@ try:
         match_payload_target,
         runtime_target_configuration_has_enabled_targets,
         runtime_target_configuration_present,
+        runtime_target_permits_standard_execution,
         target_key,
         target_label,
         target_latest_due_at,
@@ -34,6 +35,7 @@ except ModuleNotFoundError:
         match_payload_target,
         runtime_target_configuration_has_enabled_targets,
         runtime_target_configuration_present,
+        runtime_target_permits_standard_execution,
         target_key,
         target_label,
         target_latest_due_at,
@@ -124,7 +126,10 @@ def _target_enabled(target: dict[str, Any], runtime_target: dict[str, Any]) -> b
         value = target.get("RUNTIME_TARGET_ENABLED")
     if value is None:
         value = runtime_target.get("runtime_target_enabled")
-    return _enabled_value(value, default=True)
+    return (
+        _enabled_value(value, default=True)
+        and runtime_target_permits_standard_execution(runtime_target)
+    )
 
 
 def _target_service_values(target: dict[str, Any], runtime_target: dict[str, Any]) -> list[str]:

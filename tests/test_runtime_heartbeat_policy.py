@@ -276,6 +276,28 @@ def test_target_defaults_and_scheduler_aliases_are_normalized() -> None:
     }
 
 
+def test_reconcile_only_target_is_not_an_execution_heartbeat_target() -> None:
+    environ = {
+        "CLOUD_RUN_SERVICE_TARGETS_JSON": json.dumps(
+            {
+                "targets": [
+                    {
+                        "service": "reconcile-only-service",
+                        "runtime_target": {
+                            "service_name": "reconcile-only-service",
+                            "strategy_profile": "strategy-a",
+                            "live_continuity": {"state": "RECONCILE_ONLY"},
+                        },
+                    }
+                ]
+            }
+        )
+    }
+
+    assert load_runtime_targets(environ) == []
+    assert runtime_target_configuration_present(environ) is True
+
+
 
 def test_publication_grace_uses_previous_matured_schedule_cutoff() -> None:
     targets = load_runtime_targets(
