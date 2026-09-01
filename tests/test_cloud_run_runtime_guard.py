@@ -8,6 +8,12 @@ import subprocess
 from scripts import cloud_run_runtime_guard as guard
 
 
+def test_runtime_guard_notification_language_is_configurable(monkeypatch):
+    monkeypatch.setenv("NOTIFY_LANG", "zh-CN")
+
+    assert guard._notice("runtime_guard_scheduler_log_query_failed") == "Cloud Scheduler 日志查询失败"
+
+
 def test_cloud_run_log_filter_includes_region_when_available():
     log_filter = guard._cloud_run_log_filter(
         "interactive-brokers-live-u1599-tqqq-service",
