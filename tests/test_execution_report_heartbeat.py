@@ -98,6 +98,40 @@ def test_target_derived_required_services_skip_disabled_targets(monkeypatch):
     ]
 
 
+def test_target_derived_required_services_skip_reconcile_only_targets(monkeypatch):
+    monkeypatch.delenv("RUNTIME_HEARTBEAT_REQUIRED_SERVICES", raising=False)
+    monkeypatch.delenv("CLOUD_RUN_SERVICE", raising=False)
+    monkeypatch.delenv("CLOUD_RUN_SERVICES", raising=False)
+    monkeypatch.delenv("RUNTIME_HEARTBEAT_ACCOUNT_SCOPE", raising=False)
+    monkeypatch.setenv(
+        "CLOUD_RUN_SERVICE_TARGETS_JSON",
+        json.dumps(
+            {
+                "targets": [
+                    {
+                        "service": "reconcile-only-service",
+                        "runtime_target": {
+                            "service_name": "reconcile-only-service",
+                            "strategy_profile": "strategy-a",
+                            "live_continuity": {"state": "RECONCILE_ONLY"},
+                        },
+                    },
+                    {
+                        "service": "active-service",
+                        "runtime_target": {
+                            "service_name": "active-service",
+                            "strategy_profile": "strategy-b",
+                            "live_continuity": {"state": "ACTIVE_LKG"},
+                        },
+                    },
+                ]
+            }
+        ),
+    )
+
+    assert heartbeat._load_required_services() == ["active-service"]
+
+
 def test_explicit_required_services_skip_disabled_targets(monkeypatch):
     monkeypatch.setenv(
         "RUNTIME_HEARTBEAT_REQUIRED_SERVICES",

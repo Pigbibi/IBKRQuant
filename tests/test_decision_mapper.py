@@ -66,6 +66,25 @@ def test_map_strategy_decision_returns_noop_when_flagged_no_execute():
     assert "allocation" not in metadata
 
 
+def test_map_strategy_decision_fails_closed_for_unflagged_empty_positions():
+    target_weights, _signal_desc, _is_emergency, _status_desc, metadata = map_strategy_decision(
+        StrategyDecision(
+            diagnostics={
+                "signal_description": "strategy input unavailable",
+                "status_description": "waiting",
+            }
+        ),
+        strategy_profile="soxl_soxx_trend_income",
+        runtime_metadata={"managed_symbols": ("SOXL", "SOXX", "BOXX")},
+    )
+
+    assert target_weights is None
+    assert metadata["actionable"] is False
+    assert metadata["execution_blocked_reason"] == "empty_position_decision"
+    assert metadata["risk_flags"] == ("no_execute",)
+    assert "allocation" not in metadata
+
+
 def test_map_strategy_decision_translates_value_targets_for_semiconductor_strategy():
     decision = StrategyDecision(
         positions=(
