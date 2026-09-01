@@ -59,9 +59,9 @@ def validate_startup() -> None:
     }
     required_routes = {
         "/health": {"GET"},
-        "/run": {"GET", "POST"},
+        "/run": {"POST"},
         "/dry-run": {"GET", "POST"},
-        "/probe": {"GET", "POST"},
+        "/probe": {"POST"},
         "/monitor-dispatch": {"GET", "POST"},
     }
     missing_or_invalid = {

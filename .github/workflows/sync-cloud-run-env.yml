@@ -516,6 +516,7 @@ jobs:
               --platform=managed \
               --image="${image}" \
               --service-account="${GCP_RUNTIME_SERVICE_ACCOUNT}" \
+              --no-allow-unauthenticated \
               --ingress=internal \
               --max-instances=1 \
               --concurrency=1 \
@@ -1155,6 +1156,9 @@ jobs:
                 --uri="${scheduler_uri}" \
                 --schedule="${desired_schedule}" \
                 --time-zone="${market_timezone}" \
+                --http-method=POST \
+                --oidc-service-account-email="${GCP_SCHEDULER_SERVICE_ACCOUNT}" \
+                --oidc-token-audience="${service_url}" \
                 "${main_attempt_deadline_args[@]}" \
                 --quiet
             else

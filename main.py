@@ -2035,8 +2035,10 @@ def _dispatch_local_monitor(dispatch):
     }
 
 
-@app.route("/run", methods=["POST", "GET"])
+@app.route("/run", methods=["POST"])
 def handle_request():
+    if request.method != "POST":
+        return "Method Not Allowed", 405
     return _route_with_runtime_error_fallback(_handle_request)
 
 
@@ -2128,8 +2130,10 @@ def handle_paper_execution_command_consumer():
     return json.dumps(result, ensure_ascii=False), 200, {"Content-Type": "application/json"}
 
 
-@app.route("/probe", methods=["POST", "GET"])
+@app.route("/probe", methods=["POST"])
 def handle_probe():
+    if request.method != "POST":
+        return "Method Not Allowed", 405
     return _route_with_runtime_error_fallback(_handle_probe)
 
 
