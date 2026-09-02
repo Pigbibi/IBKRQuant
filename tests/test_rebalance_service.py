@@ -180,6 +180,99 @@ def test_execution_marker_preserves_legacy_trade_log_fallback_with_minimal_summa
     )
 
 
+def test_live_claim_records_closed_order_outcome_without_overwriting_marker(tmp_path):
+    claims = []
+    outcomes = []
+
+    class FakeStore:
+        def has_marker(self, _marker_key):
+            return False
+
+        def claim_marker(self, marker_key, *, metadata):
+            claims.append((marker_key, dict(metadata)))
+            return True
+
+        def record_outcome(self, marker_key, *, metadata):
+            outcomes.append((marker_key, dict(metadata)))
+            return True
+
+        def record_marker(self, *_args, **_kwargs):
+            raise AssertionError("post-claim outcome must not overwrite the execution claim")
+
+    class FakeIB:
+        def isConnected(self):
+            return True
+
+        def disconnect(self):
+            return None
+
+    order = {
+        "symbol": "AAA",
+        "side": "buy",
+        "quantity": 1,
+        "status": "Submitted",
+        "broker_order_id": "42",
+        "order_key": "ibkr-order-v1-example",
+        "order_identity": {
+            "account_scope_sha256": "account-digest",
+            "client_id": "7",
+            "order_id": "42",
+        },
+        "cumulative_filled_quantity": 0.0,
+        "status_transitions": [{"from": "created", "to": "submitted"}],
+    }
+    output_path = tmp_path / "reconciliation.json"
+
+    result = run_strategy_core(
+        connect_ib=lambda: FakeIB(),
+        get_current_portfolio=lambda _ib: ({}, {"equity": 1000.0, "buying_power": 1000.0}),
+        compute_signals=lambda _ib, _holdings: (
+            {"AAA": 1.0},
+            "signal",
+            False,
+            "status",
+            {
+                "strategy_profile": "test_strategy",
+                "trade_date": "2026-09-02",
+                "effective_date": "2026-09-02",
+                "allocation": _weight_allocation({"AAA": 1.0}, risk_symbols=("AAA",)),
+            },
+        ),
+        execute_rebalance=lambda *_args, **_kwargs: (
+            ["submitted AAA"],
+            {
+                "mode": "live",
+                "execution_status": "pending_reconciliation",
+                "action_done": True,
+                "orders_submitted": [],
+                "orders_pending": [order],
+                "orders_filled": [],
+                "orders_partially_filled": [],
+                "orders_skipped": [],
+            },
+        ),
+        send_tg_message=lambda _message: None,
+        config=IBKRRebalanceConfig(
+            translator=_build_test_translator(),
+            separator="---",
+            strategy_profile="test_strategy",
+            execution_mode="live",
+            execution_dedup_enabled=True,
+            execution_state_store=FakeStore(),
+            execution_state_account_scope="TEST_ACCOUNT_GROUP",
+            reconciliation_output_path=output_path,
+        ),
+    )
+
+    assert result.result == "OK - executed"
+    assert len(claims) == 1
+    assert len(outcomes) == 1
+    assert outcomes[0][0] == claims[0][0]
+    assert outcomes[0][1]["schema_version"] == "ibkr_order_consumer_outcome.v1"
+    assert outcomes[0][1]["orders"] == [order]
+    assert json.loads(output_path.read_text(encoding="utf-8"))["orders_pending"] == [order]
+
+
 def test_build_dashboard_localizes_strategy_details():
     dashboard = build_dashboard(
         positions={},

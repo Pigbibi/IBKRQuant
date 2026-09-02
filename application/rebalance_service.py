@@ -772,6 +772,56 @@ def _record_execution_marker(
         )
 
 
+def _record_execution_outcome(
+    *,
+    config: IBKRRebalanceConfig,
+    marker_key: str,
+    signal_metadata: dict,
+    execution_summary,
+) -> None:
+    store = getattr(config, "execution_state_store", None)
+    if not store or not marker_key:
+        return
+    summary = dict(execution_summary or {})
+    orders_by_key = {}
+    for collection in (
+        "orders_submitted",
+        "orders_pending",
+        "orders_filled",
+        "orders_partially_filled",
+        "orders_skipped",
+        "option_orders_submitted",
+        "option_orders_pending",
+        "option_orders_filled",
+        "option_orders_partially_filled",
+        "option_orders_skipped",
+    ):
+        for order in summary.get(collection) or ():
+            if isinstance(order, Mapping) and str(order.get("order_key") or "").strip():
+                orders_by_key[str(order["order_key"])] = dict(order)
+    try:
+        store.record_outcome(
+            marker_key,
+            metadata={
+                "schema_version": "ibkr_order_consumer_outcome.v1",
+                "strategy_profile": signal_metadata.get("strategy_profile")
+                or getattr(config, "strategy_profile", ""),
+                "account_scope": _resolve_execution_account_scope(config=config),
+                "dry_run_only": bool(getattr(config, "dry_run_only", False)),
+                "execution_status": str(summary.get("execution_status") or ""),
+                "action_done": bool(summary.get("action_done")),
+                "signal_date": str(signal_metadata.get("trade_date") or ""),
+                "effective_date": str(signal_metadata.get("effective_date") or ""),
+                "orders": list(orders_by_key.values()),
+            },
+        )
+    except Exception as exc:
+        print(
+            f"Execution outcome write failed\nMarker: {marker_key}\n{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
+
 def run_strategy_core(
     *,
     runtime: IBKRRebalanceRuntime | None = None,
@@ -1087,13 +1137,21 @@ def run_strategy_core(
             execution_summary=execution_summary,
             config=config,
         ):
-            _record_execution_marker(
-                config=config,
-                marker_key=execution_marker_key,
-                signal_metadata=signal_metadata,
-                trade_logs=trade_logs,
-                execution_summary=execution_summary,
-            )
+            if execution_claim_acquired:
+                _record_execution_outcome(
+                    config=config,
+                    marker_key=execution_marker_key,
+                    signal_metadata=signal_metadata,
+                    execution_summary=execution_summary,
+                )
+            else:
+                _record_execution_marker(
+                    config=config,
+                    marker_key=execution_marker_key,
+                    signal_metadata=signal_metadata,
+                    trade_logs=trade_logs,
+                    execution_summary=execution_summary,
+                )
         record = build_reconciliation_record(
             strategy_profile=signal_metadata.get("strategy_profile"),
             mode=_resolve_reconciliation_mode(

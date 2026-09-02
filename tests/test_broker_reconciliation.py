@@ -7,6 +7,7 @@ import pytest
 from application.broker_reconciliation import (
     IBKRReconciliationObservations,
     IBKRReconciliationReadError,
+    build_ibkr_order_key,
     build_reconciliation_candidate,
     collect_read_only_reconciliation_observations,
 )
@@ -36,7 +37,9 @@ def _trade(*, account_id: str = "U123"):
     return SimpleNamespace(
         order=SimpleNamespace(
             account=account_id,
-            permId=456,
+            clientId=7,
+            orderId=456,
+            permId=9001,
             action="BUY",
             orderType="LMT",
             totalQuantity=2,
@@ -58,8 +61,12 @@ def _fill(*, account_id: str = "U123"):
     return SimpleNamespace(
         execution=SimpleNamespace(
             acctNumber=account_id,
+            clientId=7,
             execId="exec-1",
             orderId=456,
+            permId=9001,
+            cumQty=1,
+            avgPrice=21.5,
             time="20260830 13:30:00 UTC",
             side="BOT",
             shares=1,
@@ -118,6 +125,36 @@ def test_collects_scoped_read_only_broker_observations() -> None:
     assert len(observations.open_orders) == 1
     assert len(observations.recent_executions) == 1
     assert observations.open_orders[0]["account"] == "U123"
+    assert observations.open_orders[0]["order_key"] == observations.recent_executions[0]["order_key"]
+    assert observations.open_orders[0]["order_identity"] == {
+        "account_scope_sha256": "64a7152bdd91f6f345d04a789b802724d369ead611ed2f7252c27507a74b8fd1",
+        "client_id": "7",
+        "order_id": "456",
+        "perm_id": "9001",
+    }
+    assert observations.open_orders[0]["cumulative_filled_quantity"] == 0.0
+    assert observations.recent_executions[0]["cumulative_filled_quantity"] == 1.0
+
+
+def test_api_order_key_is_stable_when_perm_id_arrives_later() -> None:
+    submitted_key = build_ibkr_order_key(account_id="U123", client_id=0, order_id=456)
+    reconciled_key = build_ibkr_order_key(
+        account_id="U123",
+        client_id=0,
+        order_id=456,
+        perm_id=9001,
+    )
+
+    assert submitted_key == reconciled_key
+    assert submitted_key != build_ibkr_order_key(account_id="U123", client_id=1, order_id=456)
+
+
+def test_manual_order_key_requires_perm_id() -> None:
+    assert build_ibkr_order_key(account_id="U123", order_id=0, perm_id=9001).startswith(
+        "ibkr-order-v1-"
+    )
+    with pytest.raises(ValueError, match="client_id/order_id or perm_id"):
+        build_ibkr_order_key(account_id="U123", order_id=0)
 
 
 def test_cash_reconciliation_ignores_dynamic_margin_and_valuation_tags() -> None:

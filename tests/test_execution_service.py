@@ -733,6 +733,8 @@ def test_execute_rebalance_live_cash_only_does_not_bridge_unfilled_sell_submissi
 
 def test_execute_rebalance_live_cash_only_uses_partial_fill_proceeds_and_fill_price(tmp_path, monkeypatch):
     class FakeIB:
+        wrapper = SimpleNamespace(clientId=7)
+
         def openTrades(self):
             return []
 
@@ -779,6 +781,7 @@ def test_execute_rebalance_live_cash_only_uses_partial_fill_proceeds_and_fill_pr
             trade_date="2026-07-09",
         ),
         dry_run_only=False,
+        account_ids=("U123",),
         cash_reserve_ratio=0.0,
         rebalance_threshold_ratio=0.01,
         limit_buy_premium=1.005,
@@ -790,7 +793,19 @@ def test_execute_rebalance_live_cash_only_uses_partial_fill_proceeds_and_fill_pr
 
     assert [(intent.symbol, intent.side, intent.quantity) for intent in submitted] == [("SOXL", "sell", 3)]
     assert summary["projected_sell_release_value"] == 190.0
-    assert summary["orders_partially_filled"][0]["symbol"] == "SOXL"
+    order = summary["orders_partially_filled"][0]
+    assert order["symbol"] == "SOXL"
+    assert order["order_identity"] == {
+        "account_scope_sha256": "64a7152bdd91f6f345d04a789b802724d369ead611ed2f7252c27507a74b8fd1",
+        "client_id": "7",
+        "order_id": "order-1",
+    }
+    assert order["order_key"].startswith("ibkr-order-v1-")
+    assert order["cumulative_filled_quantity"] == 1.0
+    assert order["status_transitions"] == [
+        {"from": "created", "to": "partially_filled"},
+    ]
+    assert "account_id" not in order
     assert {"symbol": "SOXX", "side": "buy", "reason": "quantity_zero"} in summary["orders_skipped"]
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from typing import Any
@@ -54,6 +55,84 @@ _CASH_BALANCE_TAG_PRIORITY = (
 
 def _text(value: object) -> str:
     return str(value or "").strip()
+
+
+def _identity_text(value: object) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def build_ibkr_order_identity(
+    *,
+    account_id: object,
+    client_id: object = None,
+    order_id: object = None,
+    perm_id: object = None,
+) -> dict[str, str]:
+    """Build the privacy-safe IBKR identity used by execution and reconciliation."""
+
+    account = _text(account_id)
+    client = _identity_text(client_id)
+    order = _identity_text(order_id)
+    permanent = _identity_text(perm_id)
+    if not account:
+        raise ValueError("IBKR order identity requires an account scope")
+    if not ((client and order and order != "0") or (permanent and permanent != "0")):
+        raise ValueError("IBKR order identity requires client_id/order_id or perm_id")
+    identity = {
+        "account_scope_sha256": hashlib.sha256(account.encode("utf-8")).hexdigest(),
+    }
+    if client:
+        identity["client_id"] = client
+    if order:
+        identity["order_id"] = order
+    if permanent and permanent != "0":
+        identity["perm_id"] = permanent
+    return identity
+
+
+def build_ibkr_order_key(
+    *,
+    account_id: object,
+    client_id: object = None,
+    order_id: object = None,
+    perm_id: object = None,
+) -> str:
+    """Match ib_insync's API-order key, with permId only for manual orders."""
+
+    identity = build_ibkr_order_identity(
+        account_id=account_id,
+        client_id=client_id,
+        order_id=order_id,
+        perm_id=perm_id,
+    )
+    if identity.get("client_id") and identity.get("order_id") not in {None, "0"}:
+        correlation = {
+            "account_scope_sha256": identity["account_scope_sha256"],
+            "client_id": identity["client_id"],
+            "order_id": identity["order_id"],
+        }
+    else:
+        correlation = {
+            "account_scope_sha256": identity["account_scope_sha256"],
+            "perm_id": identity["perm_id"],
+        }
+    encoded = json.dumps(correlation, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return "ibkr-order-v1-" + hashlib.sha256(encoded).hexdigest()
+
+
+def normalize_ibkr_order_state(status: object) -> str:
+    normalized = _text(status)
+    if normalized == "Filled":
+        return "filled"
+    if normalized in {"PartiallyFilled", "Partial"}:
+        return "partially_filled"
+    if normalized in {"PendingSubmit", "ApiPending", "ApiPendingSubmit", "Submitted", "PreSubmitted"}:
+        return "submitted"
+    if normalized in {"Cancelled", "ApiCancelled"}:
+        return "cancelled"
+    if normalized in {"Inactive", "Rejected"}:
+        return "rejected"
+    return "unknown"
 
 
 def _number(value: object, *, field_name: str) -> float:
@@ -163,10 +242,33 @@ def _normalise_open_trade(trade: Any, *, selected_account_ids: tuple[str, ...]) 
     contract = getattr(trade, "contract", None)
     if contract is None:
         raise IBKRReconciliationReadError("IBKR reconciliation received an open order without a contract.")
+    client_id = getattr(order, "clientId", None)
+    order_id = getattr(order, "orderId", None)
+    perm_id = getattr(order, "permId", None)
+    try:
+        order_identity = build_ibkr_order_identity(
+            account_id=account_id,
+            client_id=client_id,
+            order_id=order_id,
+            perm_id=perm_id,
+        )
+        order_key = build_ibkr_order_key(
+            account_id=account_id,
+            client_id=client_id,
+            order_id=order_id,
+            perm_id=perm_id,
+        )
+    except ValueError as exc:
+        raise IBKRReconciliationReadError(str(exc)) from exc
+    cumulative_filled_quantity = _number(
+        getattr(status, "filled", 0.0), field_name="open order filled quantity"
+    )
     return {
         "account": _text(account_id),
         "contract": _safe_contract_fields(contract),
-        "perm_id": _text(getattr(order, "permId", "")),
+        "order_key": order_key,
+        "order_identity": order_identity,
+        "perm_id": _text(perm_id),
         "action": _text(getattr(order, "action", "")).upper(),
         "order_type": _text(getattr(order, "orderType", "")).upper(),
         "total_quantity": _number(
@@ -175,7 +277,8 @@ def _normalise_open_trade(trade: Any, *, selected_account_ids: tuple[str, ...]) 
         "limit_price": _number(getattr(order, "lmtPrice", 0.0), field_name="open order limit price"),
         "aux_price": _number(getattr(order, "auxPrice", 0.0), field_name="open order aux price"),
         "status": _text(getattr(status, "status", "")),
-        "filled": _number(getattr(status, "filled", 0.0), field_name="open order filled quantity"),
+        "filled": cumulative_filled_quantity,
+        "cumulative_filled_quantity": cumulative_filled_quantity,
         "remaining": _number(
             getattr(status, "remaining", 0.0), field_name="open order remaining quantity"
         ),
@@ -199,11 +302,34 @@ def _normalise_execution(fill: Any, *, selected_account_ids: tuple[str, ...]) ->
     contract = getattr(fill, "contract", None)
     if execution is None or contract is None:
         raise IBKRReconciliationReadError("IBKR reconciliation received an incomplete execution record.")
+    client_id = getattr(execution, "clientId", None)
+    order_id = getattr(execution, "orderId", None)
+    perm_id = getattr(execution, "permId", None)
+    try:
+        order_identity = build_ibkr_order_identity(
+            account_id=account_id,
+            client_id=client_id,
+            order_id=order_id,
+            perm_id=perm_id,
+        )
+        order_key = build_ibkr_order_key(
+            account_id=account_id,
+            client_id=client_id,
+            order_id=order_id,
+            perm_id=perm_id,
+        )
+    except ValueError as exc:
+        raise IBKRReconciliationReadError(str(exc)) from exc
     return {
         "account": _text(account_id),
         "contract": _safe_contract_fields(contract),
+        "order_key": order_key,
+        "order_identity": order_identity,
         "execution_id": _text(getattr(execution, "execId", "")),
-        "order_id": _text(getattr(execution, "orderId", "")),
+        "order_id": _text(order_id),
+        "cumulative_filled_quantity": _number(
+            getattr(execution, "cumQty", None), field_name="execution cumulative filled quantity"
+        ),
         "time": _text(getattr(execution, "time", "")),
         "side": _text(getattr(execution, "side", "")).upper(),
         "shares": _number(getattr(execution, "shares", None), field_name="execution shares"),
@@ -504,7 +630,10 @@ __all__ = [
     "IBKRReconciliationCandidate",
     "IBKRReconciliationObservations",
     "IBKRReconciliationReadError",
+    "build_ibkr_order_identity",
+    "build_ibkr_order_key",
     "build_reconciliation_candidate",
     "collect_read_only_reconciliation_observations",
     "normalize_account_ids",
+    "normalize_ibkr_order_state",
 ]

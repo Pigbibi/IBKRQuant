@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from application.broker_reconciliation import (
+    build_ibkr_order_identity,
+    build_ibkr_order_key,
+    normalize_ibkr_order_state,
+)
 from application.paper_execution_admission import evaluate_ibkr_paper_execution_admission
 try:
     from quant_platform_kit.common.cash_sweep import should_sell_cash_sweep_to_fund_whole_share_buy
@@ -285,6 +290,53 @@ _PARTIALLY_FILLED_ORDER_STATUSES = frozenset({"PartiallyFilled", "Partial"})
 _PENDING_ORDER_STATUSES = frozenset(
     {"PendingSubmit", "ApiPending", "ApiPendingSubmit", "Submitted", "PreSubmitted"}
 )
+
+
+def _ibkr_client_id(ib: Any) -> object:
+    wrapper = getattr(ib, "wrapper", None)
+    if wrapper is not None and getattr(wrapper, "clientId", None) is not None:
+        return wrapper.clientId
+    return getattr(getattr(ib, "client", None), "clientId", None)
+
+
+def _build_order_event_payload(
+    ib: Any,
+    report: Any,
+    *,
+    account_id: object,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    status = str(getattr(report, "status", "") or "").strip()
+    order_id = getattr(report, "broker_order_id", None)
+    raw_payload = getattr(report, "raw_payload", None)
+    report_account_id = raw_payload.get("account_id") if isinstance(raw_payload, Mapping) else None
+    resolved_account_id = account_id or report_account_id
+    client_id = _ibkr_client_id(ib)
+    result = {
+        **dict(payload),
+        "status": status,
+        "broker_order_id": order_id,
+        "cumulative_filled_quantity": float(getattr(report, "filled_quantity", 0.0) or 0.0),
+        "status_transitions": [
+            {"from": "created", "to": normalize_ibkr_order_state(status)},
+        ],
+    }
+    try:
+        result["order_identity"] = build_ibkr_order_identity(
+            account_id=resolved_account_id,
+            client_id=client_id,
+            order_id=order_id,
+        )
+        result["order_key"] = build_ibkr_order_key(
+            account_id=resolved_account_id,
+            client_id=client_id,
+            order_id=order_id,
+        )
+    except ValueError:
+        # The broker effect may already exist. Keep the observed report without
+        # inventing a correlation key; the durable run claim still blocks retry.
+        result["order_key"] = None
+    return result
 
 
 def _record_order_outcome(
@@ -838,11 +890,12 @@ def _execute_option_order_intents(
         report = submit_order_intent(ib, order_intent)
         _, status_msg = check_order_submitted(report, translator=translator)
         status = str(getattr(report, "status", "") or "")
-        order_payload = {
-            **payload,
-            "status": status,
-            "broker_order_id": getattr(report, "broker_order_id", None),
-        }
+        order_payload = _build_order_event_payload(
+            ib,
+            report,
+            account_id=order_account_id,
+            payload=payload,
+        )
         outcome = _record_order_outcome(
             execution_summary,
             order_payload,
@@ -2110,13 +2163,12 @@ def execute_rebalance(
         )
         _, status_msg = check_order_submitted(report, translator=translator)
         status = str(getattr(report, "status", "") or "")
-        order_payload = {
-            "symbol": symbol,
-            "side": "sell",
-            "quantity": qty,
-            "status": status,
-            "broker_order_id": getattr(report, "broker_order_id", None),
-        }
+        order_payload = _build_order_event_payload(
+            ib,
+            report,
+            account_id=order_account_id,
+            payload={"symbol": symbol, "side": "sell", "quantity": qty},
+        )
         outcome = _record_order_outcome(execution_summary, order_payload, status=status)
         trade_logs.append(translator("market_sell", symbol=symbol, qty=format_quantity(qty)) + f" {status_msg}")
         if outcome != "failed":
@@ -2294,14 +2346,17 @@ def execute_rebalance(
             )
             _, status_msg = check_order_submitted(report, translator=translator)
             status = str(getattr(report, "status", "") or "")
-            order_payload = {
-                "symbol": symbol,
-                "side": "buy",
-                "quantity": qty,
-                "limit_price": limit_price,
-                "status": status,
-                "broker_order_id": getattr(report, "broker_order_id", None),
-            }
+            order_payload = _build_order_event_payload(
+                ib,
+                report,
+                account_id=order_account_id,
+                payload={
+                    "symbol": symbol,
+                    "side": "buy",
+                    "quantity": qty,
+                    "limit_price": limit_price,
+                },
+            )
             outcome = _record_order_outcome(execution_summary, order_payload, status=status)
             trade_logs.append(
                 translator("limit_buy", symbol=symbol, qty=format_quantity(qty), price=f"{limit_price:.2f}") + f" {status_msg}"
