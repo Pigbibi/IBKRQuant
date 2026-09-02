@@ -1064,6 +1064,10 @@ def test_feature_snapshot_runtime_fail_closes_on_entrypoint_exception(monkeypatc
 
 def test_value_target_runtime_builds_semiconductor_inputs(monkeypatch):
     captured = {}
+    monkeypatch.setattr(
+        "quant_platform_kit.strategy_lifecycle.live_equity.resolve_consecutive_losses",
+        lambda **_kwargs: 0,
+    )
 
     class FakeEntrypoint:
         manifest = StrategyManifest(
@@ -1142,6 +1146,10 @@ def test_value_target_runtime_builds_semiconductor_inputs(monkeypatch):
 
 def test_value_target_runtime_builds_tqqq_inputs(monkeypatch):
     captured = {}
+    monkeypatch.setattr(
+        "quant_platform_kit.strategy_lifecycle.live_equity.resolve_consecutive_losses",
+        lambda **_kwargs: 0,
+    )
 
     class FakeEntrypoint:
         manifest = StrategyManifest(

@@ -68,7 +68,7 @@ def test_disabled_target_gets_a_paused_canonical_precheck_before_legacy_cleanup(
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
     ensure_precheck = workflow.index('if [ -n "${precheck_state}" ]; then')
-    enabled_state = workflow.index('case "${runtime_target_enabled}" in')
+    enabled_state = workflow.index('case "${standard_execution_enabled}" in')
     pause_precheck = workflow.index('gcloud scheduler jobs pause "${managed_job_name}"')
     retire_legacy = workflow.index('python3 scripts/reconcile_cloud_runtime.py "${reconcile_args[@]}"')
 

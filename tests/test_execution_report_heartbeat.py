@@ -532,6 +532,7 @@ def test_main_rejects_previous_session_report_after_a_new_session_is_due(
 ):
     _clear_runtime_env(monkeypatch)
     monkeypatch.setenv("RUNTIME_HEARTBEAT_NAME", "IBKR US runtime")
+    monkeypatch.setenv("NOTIFY_LANG", "en")
     monkeypatch.setenv("RUNTIME_HEARTBEAT_REQUIRED_SERVICES", "svc-us")
     monkeypatch.setenv("RUNTIME_HEARTBEAT_GCS_URIS", "gs://bucket/reports")
     monkeypatch.setenv(
@@ -579,7 +580,7 @@ def test_main_rejects_previous_session_report_after_a_new_session_is_due(
 
     assert result == 1
     output = capsys.readouterr().out
-    assert "missing acceptable report for runtime target(s)" in output
+    assert "Missing acceptable execution report: svc-us" in output
     assert "predates latest due schedule" in output
 
 
