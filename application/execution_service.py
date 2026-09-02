@@ -254,8 +254,12 @@ def check_order_submitted(report, *, translator):
     """Check if order was accepted. DAY orders auto-expire at close if not filled."""
     order_id = report.broker_order_id
     status = report.status
+    order_state = normalize_ibkr_order_state(
+        status,
+        filled_quantity=getattr(report, "filled_quantity", 0.0),
+    )
 
-    if status == "Filled":
+    if order_state == "filled":
         return (
             True,
             translator(
@@ -267,7 +271,7 @@ def check_order_submitted(report, *, translator):
                 order_id=order_id,
             ),
         )
-    if status in {"PartiallyFilled", "Partial"}:
+    if order_state == "partially_filled":
         return (
             True,
             translator(
@@ -280,16 +284,9 @@ def check_order_submitted(report, *, translator):
                 order_id=order_id,
             ),
         )
-    if status in {"PendingSubmit", "ApiPending", "ApiPendingSubmit", "Submitted", "PreSubmitted"}:
+    if order_state in {"submitted", "pending_cancel"}:
         return True, f"✅ {translator('submitted', order_id=order_id, status=status)}"
     return False, f"❌ {translator('failed', reason=status)}"
-
-
-_FILLED_ORDER_STATUSES = frozenset({"Filled"})
-_PARTIALLY_FILLED_ORDER_STATUSES = frozenset({"PartiallyFilled", "Partial"})
-_PENDING_ORDER_STATUSES = frozenset(
-    {"PendingSubmit", "ApiPending", "ApiPendingSubmit", "Submitted", "PreSubmitted"}
-)
 
 
 def _ibkr_client_id(ib: Any) -> object:
@@ -318,7 +315,13 @@ def _build_order_event_payload(
         "broker_order_id": order_id,
         "cumulative_filled_quantity": float(getattr(report, "filled_quantity", 0.0) or 0.0),
         "status_transitions": [
-            {"from": "created", "to": normalize_ibkr_order_state(status)},
+            {
+                "from": "created",
+                "to": normalize_ibkr_order_state(
+                    status,
+                    filled_quantity=getattr(report, "filled_quantity", 0.0),
+                ),
+            },
         ],
     }
     try:
@@ -353,14 +356,18 @@ def _record_order_outcome(
     make the rebalance appear complete.
     """
     normalized_status = str(status or "").strip()
+    order_state = normalize_ibkr_order_state(
+        normalized_status,
+        filled_quantity=order_payload.get("cumulative_filled_quantity", 0.0),
+    )
     prefix = "option_orders" if option_order else "orders"
-    if normalized_status in _FILLED_ORDER_STATUSES:
+    if order_state == "filled":
         execution_summary[f"{prefix}_filled"].append(order_payload)
         return "filled"
-    if normalized_status in _PARTIALLY_FILLED_ORDER_STATUSES:
+    if order_state == "partially_filled":
         execution_summary[f"{prefix}_partially_filled"].append(order_payload)
         return "partially_filled"
-    if normalized_status in _PENDING_ORDER_STATUSES:
+    if order_state in {"submitted", "pending_cancel"}:
         execution_summary[f"{prefix}_pending"].append(order_payload)
         return "pending"
     execution_summary[f"{prefix}_skipped"].append(
@@ -1378,10 +1385,11 @@ def _planned_buy_order_quantity(
 
 def _projected_sell_release_value_for_report(report, *, fallback_price=0.0, fallback_quantity=0.0) -> float:
     status = str(getattr(report, "status", "") or "")
-    if status not in {"Filled", "PartiallyFilled", "Partial"}:
-        return 0.0
     filled_quantity = float(getattr(report, "filled_quantity", 0.0) or 0.0)
-    if status == "Filled" and filled_quantity <= 0.0:
+    order_state = normalize_ibkr_order_state(status, filled_quantity=filled_quantity)
+    if order_state not in {"filled", "partially_filled"}:
+        return 0.0
+    if order_state == "filled" and filled_quantity <= 0.0:
         filled_quantity = float(getattr(report, "quantity", 0.0) or fallback_quantity or 0.0)
     if filled_quantity <= 0.0:
         return 0.0

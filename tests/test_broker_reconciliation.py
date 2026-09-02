@@ -9,8 +9,10 @@ from application.broker_reconciliation import (
     IBKRReconciliationReadError,
     build_ibkr_order_key,
     build_reconciliation_candidate,
+    calculate_legacy_reconciliation_observation_sha256,
     collect_read_only_reconciliation_observations,
 )
+from quant_platform_kit.common.broker_reconciliation import calculate_broker_observation_sha256
 from quant_platform_kit.common.live_continuity import runtime_target_fingerprint
 from quant_platform_kit.common.runtime_target import build_runtime_target
 
@@ -155,6 +157,33 @@ def test_manual_order_key_requires_perm_id() -> None:
     )
     with pytest.raises(ValueError, match="client_id/order_id or perm_id"):
         build_ibkr_order_key(account_id="U123", order_id=0)
+
+
+def test_order_event_metadata_does_not_change_legacy_reconciliation_digest() -> None:
+    legacy_open_order = {
+        "account": "U123",
+        "contract": {"symbol": "SOXL"},
+        "perm_id": "9001",
+        "action": "BUY",
+        "order_type": "LMT",
+        "total_quantity": 2.0,
+        "limit_price": 22.0,
+        "aux_price": 0.0,
+        "status": "Submitted",
+        "filled": 0.0,
+        "remaining": 2.0,
+    }
+    enriched_open_order = {
+        **legacy_open_order,
+        "order_key": "ibkr-order-v1-example",
+        "order_identity": {"account_scope_sha256": "digest", "client_id": "7", "order_id": "456"},
+        "cumulative_filled_quantity": 0.0,
+        "status_transitions": [{"from": "created", "to": "submitted"}],
+    }
+
+    assert calculate_legacy_reconciliation_observation_sha256((enriched_open_order,)) == (
+        calculate_broker_observation_sha256((legacy_open_order,))
+    )
 
 
 def test_cash_reconciliation_ignores_dynamic_margin_and_valuation_tags() -> None:
@@ -411,3 +440,99 @@ def test_candidate_can_only_pass_with_all_matching_private_digests(tmp_path) -> 
 
     assert candidate.permits_active_lkg is True
     assert candidate.recovery_blockers == ()
+
+
+def test_candidate_keeps_legacy_order_digests_after_order_event_wiring(tmp_path) -> None:
+    target = _frozen_runtime_target()
+
+    def empty_env(name, default=None):
+        return str(tmp_path) if name == "IBKR_EXECUTION_STATE_DIR" else default
+
+    legacy_observations = IBKRReconciliationObservations(
+        account_scope={"account_ids": ["U123"]},
+        account_identity_match=True,
+        positions=(),
+        cash=(),
+        open_orders=(
+            {
+                "account": "U123",
+                "contract": {"symbol": "SOXL"},
+                "perm_id": "9001",
+                "status": "Submitted",
+                "filled": 0.0,
+                "remaining": 2.0,
+            },
+        ),
+        recent_executions=(
+            {
+                "account": "U123",
+                "contract": {"symbol": "SOXL"},
+                "order_id": "456",
+                "execution_id": "exec-1",
+                "shares": 1.0,
+                "price": 21.5,
+            },
+        ),
+    )
+    seed = build_reconciliation_candidate(
+        observations=legacy_observations,
+        runtime_target=target,
+        platform_id="ibkr",
+        strategy_profile="soxl_soxx_trend_income",
+        account_group="LIVE",
+        project_id=None,
+        env_reader=empty_env,
+    )
+    expected = {
+        key: seed.evidence.to_dict()[key]
+        for key in (
+            "positions_sha256",
+            "cash_sha256",
+            "open_orders_sha256",
+            "recent_executions_sha256",
+            "local_execution_ledger_sha256",
+        )
+    }
+    enriched_observations = IBKRReconciliationObservations(
+        account_scope=legacy_observations.account_scope,
+        account_identity_match=legacy_observations.account_identity_match,
+        positions=legacy_observations.positions,
+        cash=legacy_observations.cash,
+        open_orders=(
+            {
+                **legacy_observations.open_orders[0],
+                "order_key": "ibkr-order-v1-example",
+                "order_identity": {"account_scope_sha256": "digest", "client_id": "7", "order_id": "456"},
+                "cumulative_filled_quantity": 0.0,
+            },
+        ),
+        recent_executions=(
+            {
+                **legacy_observations.recent_executions[0],
+                "order_key": "ibkr-order-v1-example",
+                "order_identity": {"account_scope_sha256": "digest", "client_id": "7", "order_id": "456"},
+                "cumulative_filled_quantity": 1.0,
+            },
+        ),
+    )
+
+    def configured_env(name, default=None):
+        if name == "IBKR_EXECUTION_STATE_DIR":
+            return str(tmp_path)
+        if name == "IBKR_RECONCILIATION_EXPECTED_DIGESTS_JSON":
+            import json
+
+            return json.dumps(expected)
+        return default
+
+    candidate = build_reconciliation_candidate(
+        observations=enriched_observations,
+        runtime_target=target,
+        platform_id="ibkr",
+        strategy_profile="soxl_soxx_trend_income",
+        account_group="LIVE",
+        project_id=None,
+        env_reader=configured_env,
+    )
+
+    assert candidate.permits_active_lkg is True

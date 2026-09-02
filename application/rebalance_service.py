@@ -8,6 +8,7 @@ import json
 import re
 
 from application.cycle_result import StrategyCycleResult
+from application.broker_reconciliation import normalize_ibkr_order_state
 from application.runtime_dependencies import IBKRRebalanceConfig, IBKRRebalanceRuntime
 from application.reconciliation_service import (
     build_reconciliation_record,
@@ -778,10 +779,10 @@ def _record_execution_outcome(
     marker_key: str,
     signal_metadata: dict,
     execution_summary,
-) -> None:
+) -> bool:
     store = getattr(config, "execution_state_store", None)
     if not store or not marker_key:
-        return
+        return False
     summary = dict(execution_summary or {})
     orders_by_key = {}
     for collection in (
@@ -799,8 +800,19 @@ def _record_execution_outcome(
         for order in summary.get(collection) or ():
             if isinstance(order, Mapping) and str(order.get("order_key") or "").strip():
                 orders_by_key[str(order["order_key"])] = dict(order)
+    if not orders_by_key:
+        return False
+    if any(
+        normalize_ibkr_order_state(
+            order.get("status"),
+            filled_quantity=order.get("cumulative_filled_quantity", 0.0),
+        )
+        not in {"filled", "cancelled"}
+        for order in orders_by_key.values()
+    ):
+        return False
     try:
-        store.record_outcome(
+        recorded = store.record_outcome(
             marker_key,
             metadata={
                 "schema_version": "ibkr_order_consumer_outcome.v1",
@@ -816,10 +828,10 @@ def _record_execution_outcome(
             },
         )
     except Exception as exc:
-        print(
-            f"Execution outcome write failed\nMarker: {marker_key}\n{type(exc).__name__}: {exc}",
-            flush=True,
-        )
+        raise RuntimeError("IBKR terminal execution outcome unavailable; refusing success") from exc
+    if recorded is not True:
+        raise RuntimeError("IBKR terminal execution outcome unavailable; refusing success")
+    return True
 
 
 def run_strategy_core(

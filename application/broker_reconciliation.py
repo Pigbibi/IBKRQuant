@@ -17,6 +17,7 @@ import json
 import os
 from typing import Any
 
+from ib_insync import OrderStatus
 from quant_platform_kit.common.broker_reconciliation import (
     BrokerReconciliationEvidence,
     BrokerReconciliationFinding,
@@ -50,6 +51,14 @@ _CASH_BALANCE_TAG_PRIORITY = (
     "CashBalance",
     "TotalCashBalance",
     "SettledCash",
+)
+_ORDER_EVENT_DIGEST_FIELDS = frozenset(
+    {
+        "order_key",
+        "order_identity",
+        "cumulative_filled_quantity",
+        "status_transitions",
+    }
 )
 
 
@@ -120,19 +129,45 @@ def build_ibkr_order_key(
     return "ibkr-order-v1-" + hashlib.sha256(encoded).hexdigest()
 
 
-def normalize_ibkr_order_state(status: object) -> str:
+def normalize_ibkr_order_state(status: object, *, filled_quantity: object = 0.0) -> str:
+    """Map pinned ib_insync order states to local reconciliation states."""
+
     normalized = _text(status)
-    if normalized == "Filled":
+    try:
+        has_filled_quantity = float(filled_quantity or 0.0) > 0.0
+    except (TypeError, ValueError):
+        has_filled_quantity = False
+    if normalized == OrderStatus.Filled:
         return "filled"
-    if normalized in {"PartiallyFilled", "Partial"}:
-        return "partially_filled"
-    if normalized in {"PendingSubmit", "ApiPending", "ApiPendingSubmit", "Submitted", "PreSubmitted"}:
-        return "submitted"
-    if normalized in {"Cancelled", "ApiCancelled"}:
+    if normalized in {OrderStatus.Cancelled, OrderStatus.ApiCancelled}:
         return "cancelled"
-    if normalized in {"Inactive", "Rejected"}:
-        return "rejected"
+    if normalized in OrderStatus.ActiveStates or normalized == OrderStatus.PendingCancel:
+        if has_filled_quantity:
+            return "partially_filled"
+        return "pending_cancel" if normalized == OrderStatus.PendingCancel else "submitted"
+    if normalized == OrderStatus.Inactive:
+        return "inactive"
     return "unknown"
+
+
+def _without_order_event_digest_fields(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            key: _without_order_event_digest_fields(item)
+            for key, item in value.items()
+            if key not in _ORDER_EVENT_DIGEST_FIELDS
+        }
+    if isinstance(value, tuple):
+        return tuple(_without_order_event_digest_fields(item) for item in value)
+    if isinstance(value, list):
+        return [_without_order_event_digest_fields(item) for item in value]
+    return value
+
+
+def calculate_legacy_reconciliation_observation_sha256(value: object) -> str:
+    """Keep frozen reconciliation baselines independent of new order-event metadata."""
+
+    return calculate_broker_observation_sha256(_without_order_event_digest_fields(value))
 
 
 def _number(value: object, *, field_name: str) -> float:
@@ -558,8 +593,8 @@ def build_reconciliation_candidate(
     account_scope_sha256 = calculate_broker_observation_sha256(observations.account_scope)
     positions_sha256 = calculate_broker_observation_sha256(observations.positions)
     cash_sha256 = calculate_broker_observation_sha256(observations.cash)
-    open_orders_sha256 = calculate_broker_observation_sha256(observations.open_orders)
-    recent_executions_sha256 = calculate_broker_observation_sha256(observations.recent_executions)
+    open_orders_sha256 = calculate_legacy_reconciliation_observation_sha256(observations.open_orders)
+    recent_executions_sha256 = calculate_legacy_reconciliation_observation_sha256(observations.recent_executions)
     execution_state_store = build_execution_marker_store_from_env(
         platform_env_prefix="IBKR",
         env_reader=env_reader,
@@ -633,6 +668,7 @@ __all__ = [
     "build_ibkr_order_identity",
     "build_ibkr_order_key",
     "build_reconciliation_candidate",
+    "calculate_legacy_reconciliation_observation_sha256",
     "collect_read_only_reconciliation_observations",
     "normalize_account_ids",
     "normalize_ibkr_order_state",

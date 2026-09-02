@@ -1,6 +1,11 @@
 from types import SimpleNamespace
 
-from application.execution_service import check_order_submitted, execute_rebalance, get_available_buying_power
+from application.execution_service import (
+    _record_order_outcome,
+    check_order_submitted,
+    execute_rebalance,
+    get_available_buying_power,
+)
 from notifications.telegram import build_translator
 from quant_platform_kit.common.models import OrderIntent
 from quant_platform_kit.common.strategy_release import build_runtime_loaded_receipt
@@ -97,6 +102,39 @@ def test_check_order_submitted_accepts_pending_submit_status():
     ok, message = check_order_submitted(report, translator=translate)
     assert ok is True
     assert "submitted 123" in message
+
+
+def test_check_order_submitted_accepts_pending_cancel_with_partial_fill():
+    report = SimpleNamespace(
+        broker_order_id="123",
+        status="PendingCancel",
+        quantity=2,
+        filled_quantity=1,
+        average_fill_price=10.0,
+        symbol="SOXL",
+        side="buy",
+    )
+
+    ok, _message = check_order_submitted(report, translator=build_translator("zh"))
+
+    assert ok is True
+
+
+def test_record_order_outcome_classifies_active_status_with_fill_as_partial():
+    summary = {
+        "orders_filled": [],
+        "orders_partially_filled": [],
+        "orders_pending": [],
+        "orders_skipped": [],
+        "skipped_reasons": [],
+    }
+    order = {"symbol": "SOXL", "cumulative_filled_quantity": 1.0}
+
+    outcome = _record_order_outcome(summary, order, status="Submitted")
+
+    assert outcome == "partially_filled"
+    assert summary["orders_partially_filled"] == [order]
+    assert summary["orders_pending"] == []
 
 
 def test_get_available_buying_power_prefers_usd_cash_balance_over_aggregate_available_funds():
@@ -755,7 +793,7 @@ def test_execute_rebalance_live_cash_only_uses_partial_fill_proceeds_and_fill_pr
                 broker_order_id="order-1",
                 symbol=intent.symbol,
                 side=intent.side,
-                status="PartiallyFilled",
+                status="Submitted",
                 quantity=intent.quantity,
                 filled_quantity=1,
                 average_fill_price=190.0,

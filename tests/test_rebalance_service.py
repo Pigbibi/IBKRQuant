@@ -1,6 +1,9 @@
 import json
 
+import pytest
+
 from application.rebalance_service import (
+    _record_execution_outcome,
     _resolve_reconciliation_mode,
     _should_record_execution_marker,
     _strategy_dashboard_text,
@@ -266,11 +269,86 @@ def test_live_claim_records_closed_order_outcome_without_overwriting_marker(tmp_
 
     assert result.result == "OK - executed"
     assert len(claims) == 1
+    assert outcomes == []
+    assert json.loads(output_path.read_text(encoding="utf-8"))["orders_pending"] == [order]
+
+    terminal_order = {**order, "status": "Filled", "cumulative_filled_quantity": 1.0}
+    assert _record_execution_outcome(
+        config=IBKRRebalanceConfig(
+            translator=_build_test_translator(),
+            separator="---",
+            strategy_profile="test_strategy",
+            execution_mode="live",
+            execution_state_store=FakeStore(),
+            execution_state_account_scope="TEST_ACCOUNT_GROUP",
+        ),
+        marker_key=claims[0][0],
+        signal_metadata={"strategy_profile": "test_strategy"},
+        execution_summary={"execution_status": "executed", "orders_filled": [terminal_order]},
+    ) is True
     assert len(outcomes) == 1
     assert outcomes[0][0] == claims[0][0]
     assert outcomes[0][1]["schema_version"] == "ibkr_order_consumer_outcome.v1"
-    assert outcomes[0][1]["orders"] == [order]
-    assert json.loads(output_path.read_text(encoding="utf-8"))["orders_pending"] == [order]
+    assert outcomes[0][1]["orders"] == [terminal_order]
+
+
+def test_partial_order_does_not_create_terminal_outcome():
+    outcomes = []
+
+    class FakeStore:
+        def record_outcome(self, marker_key, *, metadata):
+            outcomes.append((marker_key, dict(metadata)))
+            return True
+
+    config = IBKRRebalanceConfig(
+        translator=_build_test_translator(),
+        separator="---",
+        execution_state_store=FakeStore(),
+    )
+
+    assert _record_execution_outcome(
+        config=config,
+        marker_key="ibkr:partial-example",
+        signal_metadata={},
+        execution_summary={
+            "execution_status": "pending_reconciliation",
+            "orders_partially_filled": [
+                {
+                    "order_key": "ibkr-order-v1-example",
+                    "status": "PendingCancel",
+                    "cumulative_filled_quantity": 1.0,
+                }
+            ],
+        },
+    ) is False
+    assert outcomes == []
+
+
+@pytest.mark.parametrize("outcome", [False, RuntimeError("durable store unavailable")])
+def test_terminal_outcome_write_failure_is_escalated(outcome):
+    class FailingStore:
+        def record_outcome(self, _marker_key, *, metadata):
+            del metadata
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    config = IBKRRebalanceConfig(
+        translator=_build_test_translator(),
+        separator="---",
+        execution_state_store=FailingStore(),
+    )
+
+    with pytest.raises(RuntimeError, match="IBKR terminal execution outcome unavailable"):
+        _record_execution_outcome(
+            config=config,
+            marker_key="ibkr:terminal-example",
+            signal_metadata={},
+            execution_summary={
+                "execution_status": "executed",
+                "orders_filled": [{"order_key": "ibkr-order-v1-example", "status": "Filled"}],
+            },
+        )
 
 
 def test_build_dashboard_localizes_strategy_details():
