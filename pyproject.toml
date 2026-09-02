@@ -21,9 +21,9 @@ dependencies = [
     "google-cloud-secret-manager",
     "google-cloud-storage",
     "yfinance",
-    "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@08eed913248953986224e09ea3a8dd9f5ebedc4e",
-    "us-equity-strategies @ git+https://github.com/QuantStrategyLab/UsEquityStrategies.git@d72fdc9feaa6a9bfe3d91cad240b54c19556d5f1",
-    "hk-equity-strategies @ git+https://github.com/QuantStrategyLab/HkEquityStrategies.git@6284d95fbf40895cc1b415444d686774f1cfdfb1",
+    "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@b13e28759a880dcb446dbfbc580dc032333b065e",
+    "us-equity-strategies @ git+https://github.com/QuantStrategyLab/UsEquityStrategies.git@18dc01711f0776a07903a7a6524bab5455c09fb1",
+    "hk-equity-strategies @ git+https://github.com/QuantStrategyLab/HkEquityStrategies.git@35bc21e1f237c4a23ad2f02f8ced7c7845d77331",
 ]
 
 [project.optional-dependencies]
@@ -64,5 +64,5 @@ include = [
 
 [tool.uv]
 override-dependencies = [
-  "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@08eed913248953986224e09ea3a8dd9f5ebedc4e",
+  "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@b13e28759a880dcb446dbfbc580dc032333b065e",
 ]
