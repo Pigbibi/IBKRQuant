@@ -10,4 +10,4 @@ us_equity_strategies = "d72fdc9feaa6a9bfe3d91cad240b54c19556d5f1"
 hk_equity_strategies = "6284d95fbf40895cc1b415444d686774f1cfdfb1"
 
 [qsl.compat]
-bundle = "2026.08.0"
+bundle = "2026.09.0"
