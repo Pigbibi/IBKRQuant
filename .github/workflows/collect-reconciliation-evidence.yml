@@ -119,6 +119,8 @@ jobs:
             --oidc-service-account-email "$GCP_SCHEDULER_SERVICE_ACCOUNT" \
             --oidc-token-audience "$SERVICE_URL" \
             --attempt-deadline '300s' \
+            --max-retry-attempts=0 \
+            --max-retry-duration=0s \
             --quiet >/dev/null
           {
             echo "job_name=$job_name"
