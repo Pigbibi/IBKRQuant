@@ -55,6 +55,24 @@ def test_dependency_pin_guard_rejects_internal_qsl_git_ref_drift(tmp_path, monke
     assert "inconsistent QuantStrategyLab dependency pin for UsEquityStrategies" in output
 
 
+def test_dependency_pin_guard_prefers_explicit_qpk_pin(monkeypatch) -> None:
+    module = _load_guard_module()
+    expected_ref = "a" * 40
+    monkeypatch.setenv("QPK_EXPECTED_PIN", expected_ref)
+    monkeypatch.setattr(
+        module.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network must not be used")),
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "check_output",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network must not be used")),
+    )
+
+    assert module.fetch_pin() == expected_ref
+
+
 def test_dependency_pin_guard_is_blocking_in_ci() -> None:
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
     step_start = workflow.index("name: Check QPK pin consistency")

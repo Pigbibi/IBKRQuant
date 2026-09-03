@@ -1,7 +1,20 @@
 import json
 import types
 
+import pytest
+
+import application.execution_receipt_adapter as execution_receipt_adapter
 from application.cycle_result import StrategyCycleResult
+
+
+@pytest.fixture(autouse=True)
+def isolate_cycle_receipt_contract(monkeypatch):
+    # Receipt semantics have dedicated adapter tests; these tests isolate HTTP routing/reporting.
+    monkeypatch.setattr(
+        execution_receipt_adapter,
+        "attach_cycle_execution_receipt",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 def route_methods(strategy_module):
@@ -649,7 +662,7 @@ def test_handle_probe_connect_timeout_sends_concise_connection_notification(stra
     monkeypatch.setattr(
         strategy_module,
         "connect_ib",
-        lambda: (_ for _ in ()).throw(TimeoutError(timeout_message)),
+        lambda **_kwargs: (_ for _ in ()).throw(TimeoutError(timeout_message)),
     )
     monkeypatch.setattr(
         strategy_module,
@@ -693,7 +706,7 @@ def test_handle_probe_failure_sends_notification(strategy_module, monkeypatch):
     monkeypatch.setattr(
         strategy_module,
         "connect_ib",
-        lambda: (_ for _ in ()).throw(RuntimeError("probe failed")),
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("probe failed")),
     )
     monkeypatch.setattr(
         strategy_module,

@@ -1,3 +1,5 @@
+import re
+import tomllib
 from pathlib import Path
 
 
@@ -28,7 +30,7 @@ def test_ci_docker_and_runtime_monitoring_use_uv_lock() -> None:
     assert lockfile.startswith("version = ")
     assert "uv sync --frozen --extra test" in ci
     assert "uv run --no-sync ruff check --exclude external ." in ci
-    assert "uv run --no-sync python external/QuantPlatformKit/scripts/check_qpk_pin_consistency.py" in ci
+    assert "uv run --no-sync python scripts/check_qpk_pin_consistency.py" in ci
     assert "uv sync --frozen --no-dev" in env_sync
     assert "uv run --no-sync python scripts/build_cloud_run_env_sync_plan.py --json" in env_sync
     setup_uv = "uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78"
@@ -59,3 +61,31 @@ def test_ci_docker_and_runtime_monitoring_use_uv_lock() -> None:
     assert "--no-install-project" not in ci
     assert "--no-install-project" not in env_sync
     assert "--no-install-project" not in dockerfile
+
+
+def test_ci_uses_declared_immutable_internal_dependency_revisions() -> None:
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    lockfile = Path("uv.lock").read_text(encoding="utf-8")
+    ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    revisions = {}
+    for dependency in pyproject["project"]["dependencies"]:
+        match = re.search(r"QuantStrategyLab/([^/]+)\.git@([0-9a-f]{40})$", dependency)
+        if match:
+            revisions[match.group(1)] = match.group(2)
+
+    assert set(revisions) == {
+        "HkEquityStrategies",
+        "QuantPlatformKit",
+        "UsEquityStrategies",
+    }
+    for repository, revision in revisions.items():
+        assert f"{repository}.git?rev={revision}#{revision}" in lockfile
+    assert (
+        f"QPK_EXPECTED_PIN={revisions['QuantPlatformKit']} "
+        "uv run --no-sync python scripts/check_qpk_pin_consistency.py"
+    ) in ci
+    assert "ref: main" not in ci
+    assert "Resolve QuantPlatformKit ref" not in ci
+    assert "repository: QuantStrategyLab/" not in ci
+    assert "external/" not in ci
+    assert "uv pip install --no-deps -e external/" not in ci
