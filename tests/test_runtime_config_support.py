@@ -72,8 +72,6 @@ EXPECTED_IBKR_ENABLED_PROFILES = frozenset(
         "russell_top50_leader_rotation",
         "soxl_soxx_trend_income",
         "tqqq_growth_income",
-        "us_equity_combo",
-        "us_equity_combo_leveraged",
         "hk_global_etf_tactical_rotation",
         "hk_low_vol_dividend_quality_snapshot",
     }
@@ -387,11 +385,11 @@ def test_runtime_target_service_name_overrides_shared_account_group_service(monk
     monkeypatch.setenv(
         "RUNTIME_TARGET_JSON",
         runtime_target_json(
-            "us_equity_combo_leveraged",
+            "tqqq_growth_income",
             dry_run_only=True,
-            deployment_selector="us-combo-shadow",
-            account_scope="us-combo-shadow",
-            service_name="interactive-brokers-us-combo-shadow-service",
+            deployment_selector="tqqq-shadow",
+            account_scope="tqqq-shadow",
+            service_name="interactive-brokers-tqqq-shadow-service",
         ),
     )
     monkeypatch.setenv("ACCOUNT_GROUP", "shared-live")
@@ -406,7 +404,7 @@ def test_runtime_target_service_name_overrides_shared_account_group_service(monk
     settings = load_platform_runtime_settings(project_id_resolver=lambda: "project-1")
 
     assert settings.account_group == "shared-live"
-    assert settings.service_name == "interactive-brokers-us-combo-shadow-service"
+    assert settings.service_name == "interactive-brokers-tqqq-shadow-service"
 
 
 def test_load_platform_runtime_settings_derives_hk_market_from_account_group(monkeypatch):
@@ -881,7 +879,8 @@ def test_platform_profile_status_matrix_matches_current_ibkr_rollout():
     assert by_profile["tqqq_growth_income"]["enabled"] is True
     assert "nasdaq_sp500_smart_dca" in by_profile
     assert "ibit_smart_dca" in by_profile
-    assert "us_equity_combo_core" not in by_profile
+    for profile in ("us_equity_combo", "us_equity_combo_core", "us_equity_combo_leveraged"):
+        assert profile not in by_profile
     assert by_profile["hk_global_etf_tactical_rotation"] == {
         "canonical_profile": "hk_global_etf_tactical_rotation",
         "display_name": "HK Global ETF Tactical Rotation",
@@ -928,13 +927,8 @@ def test_print_strategy_profile_status_json_matches_registry():
     assert by_profile["global_etf_rotation"]["requires_strategy_config_path"] is False
     assert "nasdaq_sp500_smart_dca" in by_profile
     assert "ibit_smart_dca" in by_profile
-    assert by_profile["us_equity_combo"]["profile_group"] == "direct_runtime_inputs"
-    assert by_profile["us_equity_combo"]["input_mode"] == "current_holdings+russell_snapshot"
-    assert by_profile["us_equity_combo"]["requires_strategy_config_path"] is False
-    assert by_profile["us_equity_combo_leveraged"]["profile_group"] == "direct_runtime_inputs"
-    assert by_profile["us_equity_combo_leveraged"]["input_mode"] == "market_data"
-    assert by_profile["us_equity_combo_leveraged"]["requires_strategy_config_path"] is False
-    assert by_profile["us_equity_combo_leveraged"]["config_source_policy"] == "env_only"
+    for profile in ("us_equity_combo", "us_equity_combo_core", "us_equity_combo_leveraged"):
+        assert profile not in by_profile
     assert "tech_communication_pullback_enhancement" not in by_profile
     assert by_profile["russell_top50_leader_rotation"]["profile_group"] == "snapshot_backed"
     assert by_profile["russell_top50_leader_rotation"]["display_name_zh"] == "罗素Top50领涨"
@@ -1028,26 +1022,16 @@ def test_print_strategy_switch_env_plan_for_tqqq_growth_income():
     assert "IBKR_FEATURE_SNAPSHOT_PATH" in plan["remove_if_present"]
 
 
-def test_print_strategy_switch_env_plan_keeps_optional_config_for_leveraged_combo_shadow():
+def test_print_strategy_switch_env_plan_rejects_leveraged_combo_shadow():
     result = subprocess.run(
         [sys.executable, str(SWITCH_PLAN_SCRIPT_PATH), "--profile", "us_equity_combo_leveraged", "--json"],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
 
-    plan = json.loads(result.stdout)
-    assert plan["canonical_profile"] == "us_equity_combo_leveraged"
-    assert plan["profile_group"] == "direct_runtime_inputs"
-    assert plan["input_mode"] == "market_data"
-    assert plan["requires_strategy_config_path"] is False
-    assert plan["config_source_policy"] == "env_only"
-    assert "IBKR_STRATEGY_CONFIG_PATH" in plan["optional_env"]
-    assert "IBKR_STRATEGY_CONFIG_PATH" not in plan["remove_if_present"]
-    assert "IBKR_FEATURE_SNAPSHOT_PATH" in plan["remove_if_present"]
-    assert plan["hints"]["shadow_402040_strategy_config_path"].startswith(
-        "package://us_equity_strategies/"
-    )
+    assert result.returncode == 1
+    assert "Unsupported STRATEGY_PROFILE='us_equity_combo_leveraged'" in result.stderr
 
 
 def test_print_strategy_switch_env_plan_for_hk_global_etf_dry_run():

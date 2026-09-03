@@ -13,7 +13,10 @@ def test_execution_report_heartbeat_has_market_neutral_daily_schedule() -> None:
     assert "RUNTIME_HEARTBEAT_PUBLICATION_GRACE_MINUTES:" in workflow
     assert "RUNTIME_HEARTBEAT_SCHEDULER_LOCATION:" in workflow
     assert "CLOUD_SCHEDULER_MAIN_TIME:" in workflow
-    assert "pandas-market-calendars==5.4.0" in workflow
+    assert "astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78" in workflow
+    assert "uv sync --frozen --no-dev" in workflow
+    assert "uv run --no-sync python scripts/execution_report_heartbeat.py" in workflow
+    assert "python -m pip install" not in workflow
 
 
 def test_runtime_monitor_workflows_retry_gcp_authentication() -> None:
