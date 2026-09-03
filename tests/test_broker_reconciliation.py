@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import application.broker_reconciliation as broker_reconciliation
 from application.broker_reconciliation import (
     IBKRReconciliationObservations,
     IBKRReconciliationReadError,
@@ -32,11 +33,13 @@ def _snapshot(*, account_id: str = "U123"):
     )
 
 
-def _trade(*, account_id: str = "U123"):
+def _trade(*, account_id: str = "U123", order_id: int = 456, perm_id: int = 9001):
     return SimpleNamespace(
         order=SimpleNamespace(
             account=account_id,
-            permId=456,
+            clientId=7,
+            orderId=order_id,
+            permId=perm_id,
             action="BUY",
             orderType="LMT",
             totalQuantity=2,
@@ -54,12 +57,14 @@ def _trade(*, account_id: str = "U123"):
     )
 
 
-def _fill(*, account_id: str = "U123"):
+def _fill(*, account_id: str = "U123", order_id: int = 456, perm_id: int = 9001):
     return SimpleNamespace(
         execution=SimpleNamespace(
             acctNumber=account_id,
+            clientId=7,
             execId="exec-1",
-            orderId=456,
+            orderId=order_id,
+            permId=perm_id,
             time="20260830 13:30:00 UTC",
             side="BOT",
             shares=1,
@@ -118,6 +123,44 @@ def test_collects_scoped_read_only_broker_observations() -> None:
     assert len(observations.open_orders) == 1
     assert len(observations.recent_executions) == 1
     assert observations.open_orders[0]["account"] == "U123"
+    assert observations.open_orders[0]["order_key"] == observations.recent_executions[0]["order_key"]
+
+
+@pytest.mark.parametrize("order_id", [-7, 0])
+def test_manual_order_key_uses_perm_id_for_non_positive_order_ids(order_id: int) -> None:
+    assert broker_reconciliation.build_canonical_order_key(
+        account_id="U123",
+        client_id=7,
+        order_id=order_id,
+        perm_id=9001,
+    ) == "ibkr|account=U123|perm_id=9001"
+
+
+def test_api_order_key_uses_account_client_and_positive_order_id() -> None:
+    assert broker_reconciliation.build_canonical_order_key(
+        account_id="U123",
+        client_id=7,
+        order_id=456,
+        perm_id=9001,
+    ) == "ibkr|account=U123|client_id=7|order_id=456"
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"account_id": "U123", "client_id": 7, "order_id": 0, "perm_id": None},
+        {"account_id": "U123", "client_id": 7, "order_id": -7, "perm_id": 0},
+        {"account_id": "U123", "client_id": 7, "order_id": None, "perm_id": 9001},
+        {"account_id": "U123", "client_id": 7, "order_id": "invalid", "perm_id": 9001},
+        {"account_id": "U123", "client_id": None, "order_id": 456, "perm_id": 9001},
+        {"account_id": "U123", "client_id": "invalid", "order_id": 456, "perm_id": 9001},
+        {"account_id": "U123", "client_id": 7, "order_id": 0, "perm_id": "invalid"},
+        {"account_id": "", "client_id": 7, "order_id": 456, "perm_id": 9001},
+    ],
+)
+def test_order_key_rejects_missing_or_unusable_identity(identity: dict[str, object]) -> None:
+    with pytest.raises(IBKRReconciliationReadError, match="order identity"):
+        broker_reconciliation.build_canonical_order_key(**identity)
 
 
 def test_cash_reconciliation_ignores_dynamic_margin_and_valuation_tags() -> None:

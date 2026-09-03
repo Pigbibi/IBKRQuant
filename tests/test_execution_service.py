@@ -298,6 +298,59 @@ def test_execute_rebalance_blocks_when_all_order_submissions_are_rejected(tmp_pa
     assert "failed submit_failed:VOO:Rejected" in trade_logs
 
 
+def test_execute_rebalance_does_not_mark_filled_report_executed_without_order_identity(tmp_path):
+    class FakeIB:
+        def openTrades(self):
+            return []
+
+        def fills(self):
+            return []
+
+        def accountValues(self):
+            return [SimpleNamespace(tag="CashBalance", currency="USD", value="1000")]
+
+    _trade_logs, summary = execute_rebalance(
+        FakeIB(),
+        {"VOO": 1.0},
+        {},
+        {"equity": 1000.0, "buying_power": 1000.0},
+        fetch_quote_snapshots=lambda _ib, symbols: {
+            symbol: SimpleNamespace(last_price=100.0) for symbol in symbols
+        },
+        submit_order_intent=lambda *_args, **_kwargs: SimpleNamespace(
+            broker_order_id=None,
+            status="Filled",
+            symbol="VOO",
+            side="buy",
+            quantity=9,
+            filled_quantity=9,
+            average_fill_price=100.0,
+            raw_payload={},
+        ),
+        order_intent_cls=OrderIntent,
+        translator=build_translator("en"),
+        strategy_symbols=["VOO"],
+        strategy_profile="tech_communication_pullback_enhancement",
+        signal_metadata=_signal_metadata(
+            {"VOO": 1.0},
+            risk_symbols=("VOO",),
+            trade_date="2026-04-01",
+            snapshot_as_of="2026-03-31",
+        ),
+        dry_run_only=False,
+        cash_reserve_ratio=0.0,
+        rebalance_threshold_ratio=0.02,
+        limit_buy_premium=1.005,
+        sell_settle_delay_sec=0,
+        execution_lock_dir=tmp_path,
+        return_summary=True,
+    )
+
+    assert summary["execution_status"] == "blocked"
+    assert summary["no_op_reason"] == "order_identity_unavailable:VOO"
+    assert summary["orders_filled"] == []
+
+
 def test_execute_rebalance_uses_symbol_specific_limit_buy_premium(monkeypatch, tmp_path):
     class FakeIB:
         def openTrades(self):
@@ -633,8 +686,17 @@ def test_execute_rebalance_live_cash_only_reuses_projected_sell_proceeds_when_ca
                 quantity=intent.quantity,
                 filled_quantity=intent.quantity,
                 average_fill_price=prices[intent.symbol],
+                raw_payload={
+                    "order_key": f"ibkr|account=U123|client_id=7|order_id={len(submitted)}"
+                },
             )
-        return SimpleNamespace(broker_order_id=f"order-{len(submitted)}", status="Submitted")
+        return SimpleNamespace(
+            broker_order_id=f"order-{len(submitted)}",
+            status="Submitted",
+            raw_payload={
+                "order_key": f"ibkr|account=U123|client_id=7|order_id={len(submitted)}"
+            },
+        )
 
     _trade_logs, summary = execute_rebalance(
         FakeIB(),
@@ -673,6 +735,9 @@ def test_execute_rebalance_live_cash_only_reuses_projected_sell_proceeds_when_ca
     ]
     assert summary["orders_filled"][0]["symbol"] == "SOXL"
     assert summary["orders_pending"][0]["symbol"] == "SOXX"
+    assert summary["orders_pending"][0]["order_key"] == (
+        "ibkr|account=U123|client_id=7|order_id=2"
+    )
     assert summary["orders_submitted"] == []
     assert summary["execution_status"] == "pending_reconciliation"
     assert summary["projected_sell_release_value"] == 577.5

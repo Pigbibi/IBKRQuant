@@ -63,6 +63,53 @@ def _number(value: object, *, field_name: str) -> float:
         raise IBKRReconciliationReadError(f"IBKR reconciliation is missing {field_name}.") from exc
 
 
+def _order_identity_integer(value: object, *, field_name: str) -> int:
+    if isinstance(value, bool):
+        raise IBKRReconciliationReadError(
+            f"IBKR reconciliation order identity has an invalid {field_name}."
+        )
+    try:
+        return int(str(value).strip(), 10)
+    except (TypeError, ValueError) as exc:
+        raise IBKRReconciliationReadError(
+            f"IBKR reconciliation order identity has an invalid {field_name}."
+        ) from exc
+
+
+def build_canonical_order_key(
+    *,
+    account_id: object,
+    client_id: object,
+    order_id: object,
+    perm_id: object,
+) -> str:
+    """Build the account-scoped IBKR key used by submit and reconciliation paths."""
+
+    account = _text(account_id)
+    if not account or "|" in account or any(ord(character) < 32 for character in account):
+        raise IBKRReconciliationReadError(
+            "IBKR reconciliation order identity has an invalid account id."
+        )
+    normalized_order_id = _order_identity_integer(order_id, field_name="order id")
+    if normalized_order_id <= 0:
+        normalized_perm_id = _order_identity_integer(perm_id, field_name="perm id")
+        if normalized_perm_id <= 0:
+            raise IBKRReconciliationReadError(
+                "IBKR reconciliation order identity requires a positive perm id for a manual order."
+            )
+        return f"ibkr|account={account}|perm_id={normalized_perm_id}"
+
+    normalized_client_id = _order_identity_integer(client_id, field_name="client id")
+    if normalized_client_id < 0:
+        raise IBKRReconciliationReadError(
+            "IBKR reconciliation order identity requires a non-negative client id."
+        )
+    return (
+        f"ibkr|account={account}|client_id={normalized_client_id}"
+        f"|order_id={normalized_order_id}"
+    )
+
+
 def normalize_account_ids(account_ids: Iterable[str] | str | None) -> tuple[str, ...]:
     if account_ids is None:
         return ()
@@ -165,6 +212,12 @@ def _normalise_open_trade(trade: Any, *, selected_account_ids: tuple[str, ...]) 
         raise IBKRReconciliationReadError("IBKR reconciliation received an open order without a contract.")
     return {
         "account": _text(account_id),
+        "order_key": build_canonical_order_key(
+            account_id=account_id,
+            client_id=getattr(order, "clientId", None),
+            order_id=getattr(order, "orderId", None),
+            perm_id=getattr(order, "permId", None),
+        ),
         "contract": _safe_contract_fields(contract),
         "perm_id": _text(getattr(order, "permId", "")),
         "action": _text(getattr(order, "action", "")).upper(),
@@ -201,6 +254,12 @@ def _normalise_execution(fill: Any, *, selected_account_ids: tuple[str, ...]) ->
         raise IBKRReconciliationReadError("IBKR reconciliation received an incomplete execution record.")
     return {
         "account": _text(account_id),
+        "order_key": build_canonical_order_key(
+            account_id=account_id,
+            client_id=getattr(execution, "clientId", None),
+            order_id=getattr(execution, "orderId", None),
+            perm_id=getattr(execution, "permId", None),
+        ),
         "contract": _safe_contract_fields(contract),
         "execution_id": _text(getattr(execution, "execId", "")),
         "order_id": _text(getattr(execution, "orderId", "")),
@@ -504,6 +563,7 @@ __all__ = [
     "IBKRReconciliationCandidate",
     "IBKRReconciliationObservations",
     "IBKRReconciliationReadError",
+    "build_canonical_order_key",
     "build_reconciliation_candidate",
     "collect_read_only_reconciliation_observations",
     "normalize_account_ids",

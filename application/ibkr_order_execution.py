@@ -8,7 +8,24 @@ from typing import Any, Callable
 from quant_platform_kit.common.models import ExecutionReport, OrderIntent
 from quant_platform_kit.ibkr.execution import submit_order_intent as _submit_order_intent
 
+from application.broker_reconciliation import (
+    IBKRReconciliationReadError,
+    build_canonical_order_key,
+)
+
 DEFAULT_TIME_IN_FORCE = "DAY"
+_ORDER_IDENTITY_REQUIRED_STATUSES = frozenset(
+    {
+        "ApiPending",
+        "ApiPendingSubmit",
+        "Filled",
+        "Partial",
+        "PartiallyFilled",
+        "PendingSubmit",
+        "PreSubmitted",
+        "Submitted",
+    }
+)
 
 
 def _stock_factory_for_market(
@@ -106,7 +123,7 @@ def submit_order_intent(
     """Submit an IBKR order with explicit TIF to avoid account-preset rejections."""
 
     intent = _intent_with_default_time_in_force(order_intent)
-    return _submit_order_intent(
+    report = _submit_order_intent(
         ib,
         intent,
         account_id=account_id,
@@ -125,3 +142,24 @@ def submit_order_intent(
         ),
         limit_order_factory=limit_order_factory,
     )
+    raw_payload = dict(report.raw_payload or {})
+    if report.broker_order_id is None and report.status not in _ORDER_IDENTITY_REQUIRED_STATUSES:
+        return report
+    try:
+        order_key = build_canonical_order_key(
+            account_id=raw_payload.get("account_id"),
+            client_id=getattr(getattr(ib, "client", None), "clientId", None),
+            order_id=report.broker_order_id,
+            perm_id=raw_payload.get("perm_id"),
+        )
+    except IBKRReconciliationReadError:
+        return replace(
+            report,
+            status="ReconciliationRequired",
+            raw_payload={
+                **raw_payload,
+                "broker_status": report.status,
+                "reconciliation_outcome": "order_identity_unavailable",
+            },
+        )
+    return replace(report, raw_payload={**raw_payload, "order_key": order_key})
