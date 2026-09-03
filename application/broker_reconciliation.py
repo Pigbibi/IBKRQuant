@@ -32,6 +32,7 @@ class IBKRReconciliationReadError(RuntimeError):
 
 IBKR_RECONCILIATION_EXPECTED_DIGESTS_ENV = "IBKR_RECONCILIATION_EXPECTED_DIGESTS_JSON"
 _EXPECTED_DIGEST_KEYS = (
+    "account_scope_sha256",
     "positions_sha256",
     "cash_sha256",
     "open_orders_sha256",
@@ -480,7 +481,7 @@ def build_reconciliation_candidate(
         now=observed_at or datetime.now(timezone.utc),
         expected_platform_id=platform_id,
         expected_strategy_profile=strategy_profile,
-        expected_account_scope_sha256=account_scope_sha256,
+        expected_account_scope_sha256=(expected_digests or {}).get("account_scope_sha256"),
         expected_baseline_id=baseline_id,
         expected_runtime_target_sha256=runtime_target_sha256,
         expected_positions_sha256=(expected_digests or {}).get("positions_sha256"),
