@@ -143,15 +143,34 @@ jobs:
           test -n "$REQUESTED_AT"
           mkdir -p reports
           log_entry=''
+          logging_read_failures=0
           for attempt in $(seq 1 96); do
-            log_entry="$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND timestamp>=\"${REQUESTED_AT}\" AND textPayload:\"execution_report gs://\"" --project "$GCP_PROJECT_ID" --freshness=15m --limit=10 --format=json 2>/dev/null | jq -ce 'first(.[] | select(.textPayload? | startswith("execution_report gs://")) | select(.resource.labels.revision_name? | type == "string" and length > 0)) // empty' || true)"
+            logging_output=''
+            logging_read_status=0
+            logging_output="$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND timestamp>=\"${REQUESTED_AT}\" AND textPayload:\"execution_report gs://\"" --project "$GCP_PROJECT_ID" --freshness=15m --limit=10 --format=json 2>/dev/null)" || logging_read_status=$?
+            if [ "$logging_read_status" -ne 0 ]; then
+              logging_read_failures=$((logging_read_failures + 1))
+              sleep 5
+              continue
+            fi
+            if ! jq -e . >/dev/null <<< "$logging_output"; then
+              echo "reconciliation_log_query_failed class=invalid_logging_json" >&2
+              exit 1
+            fi
+            log_entry="$(jq -c 'first(.[] | select(.textPayload? | startswith("execution_report gs://")) | select(.resource.labels.revision_name? | type == "string" and length > 0)) // empty' <<< "$logging_output")"
             if [ -n "$log_entry" ]; then
               break
             fi
             sleep 5
           done
           if [ -z "$log_entry" ]; then
-            echo "Timed out waiting for the private reconciliation report." >&2
+            if [ "$logging_read_failures" -eq 96 ]; then
+              echo "reconciliation_log_query_failed class=logging_read_nonzero_exit" >&2
+            elif [ "$logging_read_failures" -gt 0 ]; then
+              echo "reconciliation_log_query_failed class=mixed_logging_read_failures_no_candidate" >&2
+            else
+              echo "reconciliation_log_query_timeout class=no_matching_candidate" >&2
+            fi
             exit 1
           fi
           report_uri="$(jq -er '.textPayload | capture("^execution_report (?<uri>gs://[^[:space:]]+)$").uri' <<< "$log_entry")"

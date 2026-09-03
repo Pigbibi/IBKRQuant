@@ -72,3 +72,13 @@ def test_reconciliation_evidence_records_receipt_source_without_self_reference()
     assert workflow.index('Delete temporary internal reconciliation job') < receipt_upload
     assert receipt_upload < source_record < source_upload
     assert 'steps.source_record_artifact.outputs.artifact-digest' not in workflow
+
+
+def test_reconciliation_evidence_preserves_sanitized_log_query_failure_class() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert 'logging_read_failures=0' in workflow
+    assert 'reconciliation_log_query_failed class=logging_read_nonzero_exit' in workflow
+    assert 'reconciliation_log_query_timeout class=no_matching_candidate' in workflow
+    assert 'gcloud logging read' in workflow
+    assert '--format=json 2>/dev/null' in workflow
