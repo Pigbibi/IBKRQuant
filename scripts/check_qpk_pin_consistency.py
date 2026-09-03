@@ -10,6 +10,7 @@ Usage: python scripts/check_qpk_pin_consistency.py [--fix]
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -30,6 +31,10 @@ def _extract_pin(raw: str) -> str:
 
 
 def fetch_pin() -> str:
+    configured = os.getenv("QPK_EXPECTED_PIN")
+    if configured:
+        return _extract_pin(configured)
+
     errors: list[str] = []
     try:
         with urllib.request.urlopen(QPK_PIN_URL, timeout=10) as response:

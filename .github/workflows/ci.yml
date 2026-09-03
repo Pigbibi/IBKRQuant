@@ -24,66 +24,6 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve QuantPlatformKit ref
-        id: quant-platform-kit-ref
-        run: |
-          set -euo pipefail
-          ref="main"
-          for candidate in "${GITHUB_HEAD_REF:-}" "${GITHUB_BASE_REF:-}"; do
-            if [ -n "$candidate" ] && git ls-remote --exit-code --heads https://github.com/QuantStrategyLab/QuantPlatformKit.git "$candidate" >/dev/null 2>&1; then
-              ref="$candidate"
-              break
-            fi
-          done
-          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve UsEquityStrategies ref
-        id: us-equity-strategies-ref
-        run: |
-          set -euo pipefail
-          ref="main"
-          for candidate in "${GITHUB_HEAD_REF:-}" "${GITHUB_BASE_REF:-}"; do
-            if [ -n "$candidate" ] && git ls-remote --exit-code --heads https://github.com/QuantStrategyLab/UsEquityStrategies.git "$candidate" >/dev/null 2>&1; then
-              ref="$candidate"
-              break
-            fi
-          done
-          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve UsEquitySnapshotPipelines ref
-        id: us-equity-snapshot-pipelines-ref
-        run: |
-          set -euo pipefail
-          ref="main"
-          for candidate in "${GITHUB_HEAD_REF:-}" "${GITHUB_BASE_REF:-}"; do
-            if [ -n "$candidate" ] && git ls-remote --exit-code --heads https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines.git "$candidate" >/dev/null 2>&1; then
-              ref="$candidate"
-              break
-            fi
-          done
-          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout QuantPlatformKit
-        uses: actions/checkout@v6
-        with:
-          repository: QuantStrategyLab/QuantPlatformKit
-          ref: ${{ steps.quant-platform-kit-ref.outputs.ref }}
-          path: external/QuantPlatformKit
-
-      - name: Checkout UsEquityStrategies
-        uses: actions/checkout@v6
-        with:
-          repository: QuantStrategyLab/UsEquityStrategies
-          ref: ${{ steps.us-equity-strategies-ref.outputs.ref }}
-          path: external/UsEquityStrategies
-
-      - name: Checkout UsEquitySnapshotPipelines
-        uses: actions/checkout@v6
-        with:
-          repository: QuantStrategyLab/UsEquitySnapshotPipelines
-          ref: ${{ steps.us-equity-snapshot-pipelines-ref.outputs.ref }}
-          path: external/UsEquitySnapshotPipelines
-
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
@@ -111,11 +51,6 @@ jobs:
       - name: Validate production Cloud Run startup
         run: uv run --no-sync python scripts/validate_cloud_run_startup.py
 
-      - name: Install editable shared repositories
-        run: |
-          set -euo pipefail
-          uv pip install --no-deps -e external/QuantPlatformKit -e external/UsEquityStrategies -e external/UsEquitySnapshotPipelines
-
       - name: Run ruff
         run: |
           set -euo pipefail
@@ -124,9 +59,7 @@ jobs:
       - name: Check QPK pin consistency
         run: |
           set -euo pipefail
-          uv run --no-sync python external/QuantPlatformKit/scripts/check_qpk_pin_consistency.py \
-            --root . \
-            --pin-file external/QuantPlatformKit/QPK_PIN
+          QPK_EXPECTED_PIN=b13e28759a880dcb446dbfbc580dc032333b065e uv run --no-sync python scripts/check_qpk_pin_consistency.py
 
       - name: Ensure uv.lock matches pyproject.toml
         run: uv lock --check
@@ -134,4 +67,4 @@ jobs:
       - name: Run unit tests
         run: |
           set -euo pipefail
-          PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run --no-sync python -m pytest -q tests --ignore=tests/test_request_handling.py --ignore=tests/test_event_loop.py --ignore=tests/test_monitor_dispatcher.py --ignore=tests/test_notifications.py --ignore=tests/test_connect_timeout_alert.py
+          PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run --no-sync python -m pytest -q tests
