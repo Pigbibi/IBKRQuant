@@ -127,7 +127,10 @@ jobs:
             echo "requested_at=$requested_at"
           } >> "$GITHUB_OUTPUT"
 
+      # This provenance binds the report-serving revision and its image deploy labels only;
+      # it does not prove scheduler correlation or that this workflow run created the revision.
       - name: Read private no-order reconciliation candidate
+        id: receipt
         if: ${{ steps.selection.outputs.selected == 'true' }}
         env:
           PROFILE: ${{ matrix.profile }}
@@ -139,18 +142,23 @@ jobs:
           test -n "$SERVICE_URL"
           test -n "$REQUESTED_AT"
           mkdir -p reports
-          report_uri=''
+          log_entry=''
           for attempt in $(seq 1 96); do
-            report_uri="$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND timestamp>=\"${REQUESTED_AT}\" AND textPayload:\"execution_report gs://\"" --project "$GCP_PROJECT_ID" --freshness=15m --limit=10 --format='value(textPayload)' 2>/dev/null | awk '$1 == "execution_report" {print $2; exit}')"
-            if [ -n "$report_uri" ]; then
+            log_entry="$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND timestamp>=\"${REQUESTED_AT}\" AND textPayload:\"execution_report gs://\"" --project "$GCP_PROJECT_ID" --freshness=15m --limit=10 --format=json 2>/dev/null | jq -ce 'first(.[] | select(.textPayload? | startswith("execution_report gs://")) | select(.resource.labels.revision_name? | type == "string" and length > 0)) // empty' || true)"
+            if [ -n "$log_entry" ]; then
               break
             fi
             sleep 5
           done
-          if [ -z "$report_uri" ]; then
+          if [ -z "$log_entry" ]; then
             echo "Timed out waiting for the private reconciliation report." >&2
             exit 1
           fi
+          report_uri="$(jq -er '.textPayload | capture("^execution_report (?<uri>gs://[^[:space:]]+)$").uri' <<< "$log_entry")"
+          serving_revision="$(jq -er '.resource.labels.revision_name | select(type == "string" and length > 0)' <<< "$log_entry")"
+          revision_labels="$(gcloud run revisions describe "$serving_revision" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='json(metadata.labels)')"
+          service_revision_commit_sha="$(jq -er '."commit-sha" | select(type == "string" and test("^[0-9a-f]{40}$"))' <<< "$revision_labels")"
+          service_deploy_run_id="$(jq -er '."github-run-id" | select(type == "string" and test("^[0-9]+$"))' <<< "$revision_labels")"
           gcloud storage cat "$report_uri" | jq --arg profile "$PROFILE" '
             .diagnostics.broker_reconciliation as $candidate
             | {
@@ -175,6 +183,14 @@ jobs:
             and .reconciliation.evidence.strategy_profile == $profile
             and (.reconciliation.recovery_blockers | type == "array")
           ' "reports/${PROFILE}.json" >/dev/null
+          evidence_sha256="$(sha256sum "reports/${PROFILE}.json" | awk '{print $1}')"
+          test "${#evidence_sha256}" -eq 64
+          {
+            echo "evidence_sha256=$evidence_sha256"
+            echo "serving_revision=$serving_revision"
+            echo "service_revision_commit_sha=$service_revision_commit_sha"
+            echo "service_deploy_run_id=$service_deploy_run_id"
+          } >> "$GITHUB_OUTPUT"
           jq -r '[.reconciliation.permits_active_lkg, .reconciliation.expected_digests_configured, (.reconciliation.recovery_blockers | length)] | @tsv' \
             "reports/${PROFILE}.json" | awk -F '\t' '{print "candidate_collected permits_active_lkg=" $1 ", expected_digests_configured=" $2 ", blockers=" $3}'
 
@@ -189,10 +205,106 @@ jobs:
           fi
 
       - name: Retain redacted candidate
-        if: ${{ always() && steps.selection.outputs.selected == 'true' }}
+        id: receipt_artifact
+        if: ${{ success() && steps.selection.outputs.selected == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ibkr-reconciliation-${{ matrix.profile }}-${{ github.run_id }}
           path: reports/${{ matrix.profile }}.json
-          if-no-files-found: warn
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Generate reconciliation source record
+        if: ${{ success() && steps.selection.outputs.selected == 'true' }}
+        env:
+          ARTIFACT_ID: ${{ steps.receipt_artifact.outputs.artifact-id }}
+          ARTIFACT_SHA256: ${{ steps.receipt_artifact.outputs.artifact-digest }}
+          EVIDENCE_SHA256: ${{ steps.receipt.outputs.evidence_sha256 }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_HEAD_SHA: ${{ github.sha }}
+          PROFILE: ${{ matrix.profile }}
+          SERVICE: ${{ matrix.service }}
+          SERVICE_REVISION: ${{ steps.receipt.outputs.serving_revision }}
+          SERVICE_REVISION_COMMIT_SHA: ${{ steps.receipt.outputs.service_revision_commit_sha }}
+          SERVICE_DEPLOY_RUN_ID: ${{ steps.receipt.outputs.service_deploy_run_id }}
+        run: |
+          set -euo pipefail
+          test "$REPOSITORY" = 'QuantStrategyLab/InteractiveBrokersPlatform'
+          test "$WORKFLOW_REF" = "${REPOSITORY}/.github/workflows/collect-reconciliation-evidence.yml@refs/heads/main"
+          test "$WORKFLOW_SHA" = "$WORKFLOW_HEAD_SHA"
+          test -n "$ARTIFACT_ID"
+          test "$ARTIFACT_SHA256" != "$EVIDENCE_SHA256"
+          for digest in "$ARTIFACT_SHA256" "$EVIDENCE_SHA256"; do
+            test "${#digest}" -eq 64
+            case "$digest" in *[!0-9a-f]*) exit 1 ;; esac
+          done
+          for sha in "$WORKFLOW_HEAD_SHA" "$SERVICE_REVISION_COMMIT_SHA"; do
+            test "${#sha}" -eq 40
+            case "$sha" in *[!0-9a-f]*) exit 1 ;; esac
+          done
+          mkdir -p source-records
+          source_record="source-records/${PROFILE}.json"
+          jq -n \
+            --arg schema_version 'ibkr_reconciliation_source_receipt_record.v1' \
+            --arg repository "$REPOSITORY" \
+            --arg workflow_path '.github/workflows/collect-reconciliation-evidence.yml' \
+            --arg workflow_run_id "$WORKFLOW_RUN_ID" \
+            --arg workflow_run_attempt "$WORKFLOW_RUN_ATTEMPT" \
+            --arg workflow_head_sha "$WORKFLOW_HEAD_SHA" \
+            --arg artifact_id "$ARTIFACT_ID" \
+            --arg artifact_name "ibkr-reconciliation-${PROFILE}-${WORKFLOW_RUN_ID}" \
+            --arg artifact_sha256 "$ARTIFACT_SHA256" \
+            --arg evidence_sha256 "$EVIDENCE_SHA256" \
+            --arg service_name "$SERVICE" \
+            --arg service_revision "$SERVICE_REVISION" \
+            --arg service_revision_commit_sha "$SERVICE_REVISION_COMMIT_SHA" \
+            --arg service_deploy_run_id "$SERVICE_DEPLOY_RUN_ID" \
+            '{
+              schema_version,
+              repository,
+              workflow_path,
+              workflow_run_id,
+              workflow_run_attempt,
+              workflow_head_sha,
+              artifact_id,
+              artifact_name,
+              artifact_sha256,
+              evidence_sha256,
+              service_name,
+              service_revision,
+              service_revision_commit_sha,
+              service_deploy_run_id
+            }' > "$source_record"
+          jq -e '
+            (keys | sort) == [
+              "artifact_id",
+              "artifact_name",
+              "artifact_sha256",
+              "evidence_sha256",
+              "repository",
+              "schema_version",
+              "service_deploy_run_id",
+              "service_name",
+              "service_revision",
+              "service_revision_commit_sha",
+              "workflow_head_sha",
+              "workflow_path",
+              "workflow_run_attempt",
+              "workflow_run_id"
+            ]
+            and all(.[]; type == "string" and length > 0)
+          ' "$source_record" >/dev/null
+
+      - name: Upload reconciliation source record
+        id: source_record_artifact
+        if: ${{ success() && steps.selection.outputs.selected == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ibkr-reconciliation-source-record-${{ matrix.profile }}-${{ github.run_id }}
+          path: source-records/${{ matrix.profile }}.json
+          if-no-files-found: error
           retention-days: 30
