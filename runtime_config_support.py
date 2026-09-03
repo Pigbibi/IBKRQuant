@@ -174,7 +174,7 @@ class PlatformRuntimeSettings:
     feature_snapshot_fallback_mode: str | None = None
     feature_snapshot_fallback_cache_dir: str | None = None
     feature_snapshot_fallback_max_stale_days: int | None = None
-    runtime_target_enabled: bool = True
+    runtime_target_enabled: bool = False
     market: str = DEFAULT_MARKET
     market_calendar: str = DEFAULT_MARKET_CALENDAR
     market_currency: str = DEFAULT_MARKET_CURRENCY
@@ -671,7 +671,7 @@ def resolve_optional_ratio_env(name: str, default: float | None = None) -> float
 
 
 def resolve_runtime_target_enabled_env() -> bool:
-    return resolve_optional_bool_env("RUNTIME_TARGET_ENABLED", default=True)
+    return resolve_optional_bool_env("RUNTIME_TARGET_ENABLED", default=False)
 
 
 def resolve_account_group(raw_value: str | None) -> str:

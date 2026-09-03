@@ -24,6 +24,9 @@ def strategy_module_factory(monkeypatch):
             "IB_CLIENT_ID": "1",
             "IBKR_FEATURE_SNAPSHOT_MANIFEST_PATH": None,
             "IBKR_RECONCILIATION_OUTPUT_PATH": None,
+            # Request-handling tests exercise post-gate behavior; individual
+            # disabled-gate tests override this value explicitly.
+            "RUNTIME_TARGET_ENABLED": "true",
             "IB_ACCOUNT_GROUP_CONFIG_JSON": (
                 '{"groups":{"default":{"ib_gateway_instance_name":"127.0.0.1",'
                 '"ib_gateway_mode":"live","ib_client_id":1,"account_ids":["U1234567"]}}}'

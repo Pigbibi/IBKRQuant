@@ -201,7 +201,7 @@ def test_load_platform_runtime_settings_uses_minimal_group_config(monkeypatch):
     assert settings.income_layer_enabled is None
     assert settings.income_layer_start_usd is None
     assert settings.income_layer_max_ratio is None
-    assert settings.runtime_target_enabled is True
+    assert settings.runtime_target_enabled is False
     assert settings.account_group == "paper"
     assert settings.service_name is None
     assert settings.account_ids == ()
