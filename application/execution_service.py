@@ -302,6 +302,22 @@ def _record_order_outcome(
     """
     normalized_status = str(status or "").strip()
     prefix = "option_orders" if option_order else "orders"
+    identity_failure = str(order_payload.get("reconciliation_outcome") or "").strip()
+    order_key = str(order_payload.get("order_key") or "").strip()
+    identity_required_statuses = (
+        _FILLED_ORDER_STATUSES
+        | _PARTIALLY_FILLED_ORDER_STATUSES
+        | _PENDING_ORDER_STATUSES
+    )
+    if normalized_status == "ReconciliationRequired":
+        identity_failure = identity_failure or "order_identity_unavailable"
+    if identity_failure or (normalized_status in identity_required_statuses and not order_key):
+        reason = identity_failure or "order_identity_unavailable"
+        execution_summary[f"{prefix}_skipped"].append({**order_payload, "reason": reason})
+        execution_summary["skipped_reasons"].append(
+            f"{reason}:{order_payload.get('symbol')}"
+        )
+        return "failed"
     if normalized_status in _FILLED_ORDER_STATUSES:
         execution_summary[f"{prefix}_filled"].append(order_payload)
         return "filled"
@@ -319,6 +335,17 @@ def _record_order_outcome(
         f"{failure_prefix}:{order_payload.get('symbol')}:{normalized_status or 'unknown'}"
     )
     return "failed"
+
+
+def _report_order_identity(report: object) -> dict[str, str]:
+    raw_payload = getattr(report, "raw_payload", None)
+    if not isinstance(raw_payload, Mapping):
+        return {}
+    return {
+        key: str(raw_payload[key]).strip()
+        for key in ("order_key", "reconciliation_outcome")
+        if str(raw_payload.get(key) or "").strip()
+    }
 
 
 def _normalize_account_ids(account_ids=None) -> tuple[str, ...]:
@@ -842,6 +869,7 @@ def _execute_option_order_intents(
             **payload,
             "status": status,
             "broker_order_id": getattr(report, "broker_order_id", None),
+            **_report_order_identity(report),
         }
         outcome = _record_order_outcome(
             execution_summary,
@@ -2116,6 +2144,7 @@ def execute_rebalance(
             "quantity": qty,
             "status": status,
             "broker_order_id": getattr(report, "broker_order_id", None),
+            **_report_order_identity(report),
         }
         outcome = _record_order_outcome(execution_summary, order_payload, status=status)
         trade_logs.append(translator("market_sell", symbol=symbol, qty=format_quantity(qty)) + f" {status_msg}")
@@ -2301,6 +2330,7 @@ def execute_rebalance(
                 "limit_price": limit_price,
                 "status": status,
                 "broker_order_id": getattr(report, "broker_order_id", None),
+                **_report_order_identity(report),
             }
             outcome = _record_order_outcome(execution_summary, order_payload, status=status)
             trade_logs.append(
@@ -2333,6 +2363,14 @@ def execute_rebalance(
     has_pending_order = bool(
         execution_summary["orders_pending"] or execution_summary["option_orders_pending"]
     )
+    identity_failure = next(
+        (
+            reason
+            for reason in execution_summary["skipped_reasons"]
+            if reason.startswith("order_identity_unavailable:")
+        ),
+        None,
+    )
     submission_failure = next(
         (
             reason
@@ -2341,7 +2379,11 @@ def execute_rebalance(
         ),
         None,
     )
-    if has_pending_order:
+    if identity_failure:
+        execution_summary["execution_status"] = "blocked"
+        execution_summary["no_op_reason"] = identity_failure
+        trade_logs.append(translator("failed", reason=identity_failure))
+    elif has_pending_order:
         execution_summary["execution_status"] = "pending_reconciliation"
         execution_summary["no_op_reason"] = "broker_order_pending_confirmation"
     elif has_terminal_order:

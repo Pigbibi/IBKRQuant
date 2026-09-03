@@ -22,6 +22,7 @@ class FakeLimitOrder:
 
 class FakeIB:
     def __init__(self):
+        self.client = SimpleNamespace(clientId=7)
         self.placed_contract = None
         self.placed_order = None
 
@@ -85,7 +86,7 @@ def test_submit_order_intent_sets_default_day_tif_on_market_orders():
 
     report = submit_order_intent(
         ib,
-        OrderIntent(symbol="AAPL", side="sell", quantity=3),
+        OrderIntent(symbol="AAPL", side="sell", quantity=3, account_id="U1234567"),
         wait_seconds=0,
         stock_factory=fake_stock,
         market_order_factory=FakeMarketOrder,
@@ -101,7 +102,13 @@ def test_submit_order_intent_preserves_explicit_tif_on_market_orders():
 
     submit_order_intent(
         ib,
-        OrderIntent(symbol="AAPL", side="sell", quantity=3, time_in_force="GTC"),
+        OrderIntent(
+            symbol="AAPL",
+            side="sell",
+            quantity=3,
+            time_in_force="GTC",
+            account_id="U1234567",
+        ),
         wait_seconds=0,
         stock_factory=fake_stock,
         market_order_factory=FakeMarketOrder,
@@ -123,6 +130,24 @@ def test_submit_order_intent_preserves_account_id():
 
     assert ib.placed_order.account == "U1234567"
     assert report.raw_payload["account_id"] == "U1234567"
+    assert report.raw_payload["order_key"] == "ibkr|account=U1234567|client_id=7|order_id=42"
+
+
+def test_submit_order_intent_returns_reconciliation_outcome_when_order_key_cannot_be_built():
+    ib = FakeIB()
+    ib.client.clientId = None
+
+    report = submit_order_intent(
+        ib,
+        OrderIntent(symbol="AAPL", side="buy", quantity=3, account_id="U1234567"),
+        wait_seconds=0,
+        stock_factory=fake_stock,
+        market_order_factory=FakeMarketOrder,
+    )
+
+    assert report.status == "ReconciliationRequired"
+    assert report.raw_payload["reconciliation_outcome"] == "order_identity_unavailable"
+    assert "order_key" not in report.raw_payload
 
 
 def test_submit_order_intent_can_target_hk_stock_exchange_and_currency():
@@ -130,7 +155,7 @@ def test_submit_order_intent_can_target_hk_stock_exchange_and_currency():
 
     submit_order_intent(
         ib,
-        OrderIntent(symbol="00700", side="buy", quantity=100),
+        OrderIntent(symbol="00700", side="buy", quantity=100, account_id="U1234567"),
         wait_seconds=0,
         stock_factory=fake_stock,
         market_order_factory=FakeMarketOrder,
@@ -154,6 +179,7 @@ def test_submit_order_intent_passes_option_factory_and_default_tif():
             quantity=1,
             order_type="limit",
             limit_price=150.0,
+            account_id="U1234567",
             metadata={
                 "asset_class": "option",
                 "intent_type": "single_leg_option",

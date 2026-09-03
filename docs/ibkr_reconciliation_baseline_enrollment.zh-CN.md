@@ -14,6 +14,30 @@
 让操作者人工确认“恢复原有实盘基线”。现有自动化权限策略将这类 broker/order
 execution 变更视为高风险，禁止自动恢复。
 
+## Canonical order-key 身份契约
+
+固定依赖 `ib-insync==0.9.86` 的 `Wrapper.orderKey` 规则是：`orderId <= 0` 代表
+TWS manual order，使用 `permId`；正 `orderId` 使用 `(clientId, orderId)`。平台在此
+基础上加入账户隔离，形成以下唯一身份状态表：
+
+| 输入 | canonical key | 对账结果 |
+|---|---|---|
+| `orderId > 0`，且 account/client/order 完整 | `ibkr|account=...|client_id=...|order_id=...` | `IDENTIFIED` |
+| `orderId <= 0`，且 account/正 `permId` 完整 | `ibkr|account=...|perm_id=...` | `IDENTIFIED` |
+| account、orderId、所需 clientId/permId 缺失或不可归一 | 不生成 key | `IDENTITY_UNAVAILABLE`，失败关闭 |
+
+提交适配器只会把 `IDENTIFIED` 报告交给成功状态；身份失败固定返回
+`ReconciliationRequired` 和 `reconciliation_outcome=order_identity_unavailable`，上游执行摘要
+必须为 `blocked`，不得写成 `executed` 或把 key 置为 `None` 后继续。只读对账遇到同类失败时
+直接拒绝本次采集，`/reconcile` 返回失败且不生成候选。
+
+`broker_order_id` 只是原始回执字段，不能替代 canonical key；即使同一批结果中已有完成订单，
+任一 identity unavailable 或 `ReconciliationRequired` 仍优先使整体摘要失败关闭为 `blocked`。
+
+canonical key 会进入私有 open-order/recent-execution 归一记录，因此新代码生成的对应摘要可能
+与旧 expected digest 不同；不匹配时继续保持 `RECONCILE_ONLY`。本契约不更新基线、不授权重录，
+也不定义 partial、cancel 或 terminal outcome 语义。
+
 ## 发布给统一管理站点的最小来源快照
 
 `scripts/publish_reconciliation_recovery_source.py` 只接受上一步的私有候选和
