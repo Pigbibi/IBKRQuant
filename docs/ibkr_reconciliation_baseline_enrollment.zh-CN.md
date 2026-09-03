@@ -108,3 +108,21 @@ Scheduler 任务，再由既有的最小权限 Scheduler 身份调用冻结服�
 其中现金摘要只选择结算/账面现金标签（例如 `CashBalance`），不会把随市价变化的
 `NetLiquidation` 或保证金可用额计入。这样没有现金、订单或仓位变化的账户不会因为正常
 估值波动而被误判为基线漂移；没有可靠现金标签时仍会失败关闭。
+
+## v2 来源根（仅私有候选构造）
+
+`application.broker_reconciliation_candidate` 将**恰好两份**已保存、已脱敏的 source
+record 绑定到既有 v1 候选，显式生成
+`broker_reconciliation_baseline_candidate.v2`。每条 record 固定且只允许
+`schema_version`、`repository`、`workflow_path`、`workflow_run_id`、
+`workflow_run_attempt`、`workflow_head_sha`、`artifact_id`、`artifact_name`、
+`artifact_sha256`、`evidence_sha256`、`service_name`、`service_revision`、
+`service_revision_commit_sha`、`service_deploy_run_id`。构造器要求恰好两条，唯一
+artifact/run；审计指定的 expectation 还将 candidate profile、`main` 成功 workflow、
+artifact 命名，以及相同 repository/workflow/head 与 service/revision/commit 绑定到这两条
+record。随后将完整 canonical records 的单一根写入 `source_receipts_sha256`；任一缺失、
+额外字段或不一致均失败关闭。
+
+该模块是无 I/O 的 private consumer：不查询 GitHub/Cloud Run，不启动 workflow，不接触
+broker/account/order，也不读取或写入 expected digest、`ACTIVE_LKG` 或 publisher。在线读取和
+持久化来源记录属于后续受控 recorder，不在此范围内。
