@@ -124,9 +124,16 @@ jobs:
             --max-retry-attempts=0 \
             --max-retry-duration=0s \
             --quiet >/dev/null
+          scheduler_job_config="$(gcloud scheduler jobs describe "$job_name" --project "$GCP_PROJECT_ID" --location "$GCP_REGION" --format=json)"
+          scheduler_job_identity="$(jq -er '.name | select(type == "string" and length > 0)' <<< "$scheduler_job_config")"
+          configured_request_id="$(jq -er '.httpTarget.headers["X-QSL-Reconciliation-Request-Id"] | select(type == "string" and length > 0)' <<< "$scheduler_job_config")"
+          test "$configured_request_id" = "$request_id"
+          scheduler_job_sha256="$(printf '%s' "$scheduler_job_identity" | sha256sum | awk '{print $1}')"
+          test "${#scheduler_job_sha256}" -eq 64
           {
             echo "job_name=$job_name"
             echo "request_id=$request_id"
+            echo "scheduler_job_sha256=$scheduler_job_sha256"
             echo "requested_at=$requested_at"
           } >> "$GITHUB_OUTPUT"
 
@@ -138,11 +145,11 @@ jobs:
         env:
           PROFILE: ${{ matrix.profile }}
           SERVICE: ${{ matrix.service }}
-          REQUEST_ID: ${{ steps.scheduler.outputs.request_id }}
+          SCHEDULER_JOB_SHA256: ${{ steps.scheduler.outputs.scheduler_job_sha256 }}
           REQUESTED_AT: ${{ steps.scheduler.outputs.requested_at }}
         run: |
           set -euo pipefail
-          test -n "$REQUEST_ID"
+          test -n "$SCHEDULER_JOB_SHA256"
           test -n "$REQUESTED_AT"
           mkdir -p reports
           log_entry=''
@@ -164,7 +171,7 @@ jobs:
             if jq -e '[.[] | select(.textPayload? | type == "string") | select(.textPayload | startswith("reconciliation_receipt_ready "))] | length > 0' >/dev/null <<< "$logging_output"; then
               receipt_marker_seen=true
             fi
-            log_entry="$(jq -c --arg request_id "$REQUEST_ID" 'first(.[] | select(.textPayload? | type == "string") | select(.textPayload | startswith("reconciliation_receipt_ready request_id=" + $request_id + " report_uri=gs://")) | select(.resource.labels.revision_name? | type == "string" and length > 0)) // empty' <<< "$logging_output")"
+            log_entry="$(jq -c --arg scheduler_job_sha256 "$SCHEDULER_JOB_SHA256" 'first(.[] | select(.textPayload? | type == "string") | select(.textPayload | startswith("reconciliation_receipt_ready scheduler_job_sha256=" + $scheduler_job_sha256 + " report_uri=gs://")) | select(.resource.labels.revision_name? | type == "string" and length > 0)) // empty' <<< "$logging_output")"
             if [ -n "$log_entry" ]; then
               break
             fi
@@ -176,24 +183,24 @@ jobs:
             elif [ "$logging_read_failures" -gt 0 ]; then
               echo "reconciliation_log_query_failed class=mixed_logging_read_failures_no_candidate" >&2
             elif [ "$receipt_marker_seen" = true ]; then
-              echo "reconciliation_log_query_timeout class=receipt_request_id_mismatch" >&2
+              echo "reconciliation_log_query_timeout class=receipt_scheduler_job_mismatch" >&2
             else
               echo "reconciliation_log_query_timeout class=no_matching_candidate" >&2
             fi
             exit 1
           fi
-          receipt="$(jq -cer --arg request_id "$REQUEST_ID" '.textPayload | capture("^reconciliation_receipt_ready request_id=(?<request_id>[0-9a-f-]{36}) report_uri=(?<uri>gs://[^[:space:]]+)$") | select(.request_id == $request_id)' <<< "$log_entry")"
+          receipt="$(jq -cer --arg scheduler_job_sha256 "$SCHEDULER_JOB_SHA256" '.textPayload | capture("^reconciliation_receipt_ready scheduler_job_sha256=(?<scheduler_job_sha256>[0-9a-f]{64}) report_uri=(?<uri>gs://[^[:space:]]+)$") | select(.scheduler_job_sha256 == $scheduler_job_sha256)' <<< "$log_entry")"
           report_uri="$(jq -er '.uri' <<< "$receipt")"
           serving_revision="$(jq -er '.resource.labels.revision_name | select(type == "string" and length > 0)' <<< "$log_entry")"
           revision_labels="$(gcloud run revisions describe "$serving_revision" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='json(metadata.labels)')"
           service_revision_commit_sha="$(jq -er '."commit-sha" | select(type == "string" and test("^[0-9a-f]{40}$"))' <<< "$revision_labels")"
           service_deploy_run_id="$(jq -er '."github-run-id" | select(type == "string" and test("^[0-9]+$"))' <<< "$revision_labels")"
-          gcloud storage cat "$report_uri" | jq --arg profile "$PROFILE" --arg request_id "$REQUEST_ID" '
+          gcloud storage cat "$report_uri" | jq --arg profile "$PROFILE" --arg scheduler_job_sha256 "$SCHEDULER_JOB_SHA256" '
             .diagnostics.broker_reconciliation as $candidate
             | {
                 schema_version: "ibkr_reconciliation_artifact.v1",
                 strategy_profile: $profile,
-                reconciliation_request_id: .diagnostics.reconciliation_request_id,
+                reconciliation_scheduler_job_sha256: .diagnostics.reconciliation_scheduler_job_sha256,
                 report_status: .status,
                 reconciliation: $candidate,
                 errors: [
@@ -205,10 +212,10 @@ jobs:
                 ]
               }
           ' > "reports/${PROFILE}.json"
-          jq -e --arg profile "$PROFILE" --arg request_id "$REQUEST_ID" '
+          jq -e --arg profile "$PROFILE" --arg scheduler_job_sha256 "$SCHEDULER_JOB_SHA256" '
             .schema_version == "ibkr_reconciliation_artifact.v1"
             and .strategy_profile == $profile
-            and .reconciliation_request_id == $request_id
+            and .reconciliation_scheduler_job_sha256 == $scheduler_job_sha256
             and .reconciliation.schema_version == "ibkr_reconciliation_candidate.v1"
             and .reconciliation.evidence.platform_id == "ibkr"
             and .reconciliation.evidence.strategy_profile == $profile
@@ -262,6 +269,7 @@ jobs:
           SERVICE_REVISION: ${{ steps.receipt.outputs.serving_revision }}
           SERVICE_REVISION_COMMIT_SHA: ${{ steps.receipt.outputs.service_revision_commit_sha }}
           SERVICE_DEPLOY_RUN_ID: ${{ steps.receipt.outputs.service_deploy_run_id }}
+          SCHEDULER_JOB_SHA256: ${{ steps.scheduler.outputs.scheduler_job_sha256 }}
         run: |
           set -euo pipefail
           test "$REPOSITORY" = 'QuantStrategyLab/InteractiveBrokersPlatform'
@@ -277,6 +285,8 @@ jobs:
             test "${#sha}" -eq 40
             case "$sha" in *[!0-9a-f]*) exit 1 ;; esac
           done
+          test "${#SCHEDULER_JOB_SHA256}" -eq 64
+          case "$SCHEDULER_JOB_SHA256" in *[!0-9a-f]*) exit 1 ;; esac
           mkdir -p source-records
           source_record="source-records/${PROFILE}.json"
           jq -n \
@@ -294,6 +304,7 @@ jobs:
             --arg service_revision "$SERVICE_REVISION" \
             --arg service_revision_commit_sha "$SERVICE_REVISION_COMMIT_SHA" \
             --arg service_deploy_run_id "$SERVICE_DEPLOY_RUN_ID" \
+            --arg scheduler_job_sha256 "$SCHEDULER_JOB_SHA256" \
             '{
               schema_version,
               repository,
@@ -308,7 +319,8 @@ jobs:
               service_name,
               service_revision,
               service_revision_commit_sha,
-              service_deploy_run_id
+              service_deploy_run_id,
+              scheduler_job_sha256
             }' > "$source_record"
           jq -e '
             (keys | sort) == [
@@ -318,6 +330,7 @@ jobs:
               "evidence_sha256",
               "repository",
               "schema_version",
+              "scheduler_job_sha256",
               "service_deploy_run_id",
               "service_name",
               "service_revision",
