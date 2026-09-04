@@ -147,6 +147,7 @@ jobs:
           mkdir -p reports
           log_entry=''
           logging_read_failures=0
+          receipt_marker_seen=false
           for _ in $(seq 1 96); do
             logging_output=''
             logging_read_status=0
@@ -160,6 +161,9 @@ jobs:
               echo "reconciliation_log_query_failed class=invalid_logging_json" >&2
               exit 1
             fi
+            if jq -e '[.[] | select(.textPayload? | type == "string") | select(.textPayload | startswith("reconciliation_receipt_ready "))] | length > 0' >/dev/null <<< "$logging_output"; then
+              receipt_marker_seen=true
+            fi
             log_entry="$(jq -c --arg request_id "$REQUEST_ID" 'first(.[] | select(.textPayload? | type == "string") | select(.textPayload | startswith("reconciliation_receipt_ready request_id=" + $request_id + " report_uri=gs://")) | select(.resource.labels.revision_name? | type == "string" and length > 0)) // empty' <<< "$logging_output")"
             if [ -n "$log_entry" ]; then
               break
@@ -171,6 +175,8 @@ jobs:
               echo "reconciliation_log_query_failed class=logging_read_nonzero_exit" >&2
             elif [ "$logging_read_failures" -gt 0 ]; then
               echo "reconciliation_log_query_failed class=mixed_logging_read_failures_no_candidate" >&2
+            elif [ "$receipt_marker_seen" = true ]; then
+              echo "reconciliation_log_query_timeout class=receipt_request_id_mismatch" >&2
             else
               echo "reconciliation_log_query_timeout class=no_matching_candidate" >&2
             fi
