@@ -28,6 +28,7 @@ from application.broker_reconciliation import (
     build_reconciliation_candidate,
     collect_read_only_reconciliation_observations,
 )
+from application.reconciliation_reporting import build_persistable_reconciliation_report
 from application.runtime_broker_adapters import (
     IBKRGatewayUnavailableError,
     IBKRTradingPermissionError,
@@ -906,6 +907,7 @@ def connect_ib(
         dry_run_only_override=adapter_dry_run_override,
     ).connect_ib(
         validate_trading_permissions=validate_trading_permissions,
+        redact_connection_diagnostics=read_only,
     )
 
 
@@ -923,6 +925,13 @@ def build_execution_report(log_context, *, dry_run_only_override: bool | None = 
 
 def persist_execution_report(report, *, dry_run_only_override: bool | None = None):
     return build_composer(dry_run_only_override=dry_run_only_override).build_reporting_adapters().persist_execution_report(report)
+
+
+def persist_reconciliation_report(report):
+    return persist_execution_report(
+        build_persistable_reconciliation_report(report),
+        dry_run_only_override=True,
+    )
 
 
 def build_request_log_context():
@@ -1933,7 +1942,7 @@ def _handle_reconciliation():
             append_runtime_report_error(
                 report,
                 stage="broker_reconciliation",
-                message=str(exc),
+                message="Broker reconciliation failed.",
                 error_type=type(exc).__name__,
                 failure_category="broker_reconciliation",
             )
@@ -1950,7 +1959,6 @@ def _handle_reconciliation():
                 severity="ERROR",
                 execution_window="reconciliation",
                 error_type=type(exc).__name__,
-                error_message=str(exc),
             )
         return "Error", 503
     except Exception as exc:
@@ -1958,7 +1966,7 @@ def _handle_reconciliation():
             append_runtime_report_error(
                 report,
                 stage="broker_reconciliation",
-                message=str(exc),
+                message="Broker reconciliation failed.",
                 error_type=type(exc).__name__,
             )
             finalize_runtime_report(report, status="error")
@@ -1970,7 +1978,6 @@ def _handle_reconciliation():
                 severity="ERROR",
                 execution_window="reconciliation",
                 error_type=type(exc).__name__,
-                error_message=str(exc),
             )
         return "Error", 500
     finally:
@@ -1978,13 +1985,21 @@ def _handle_reconciliation():
             try:
                 ib.disconnect()
             except Exception as disconnect_exc:
-                print(f"failed to disconnect IBKR reconciliation client: {disconnect_exc}", flush=True)
+                print(
+                    "failed to disconnect IBKR reconciliation client "
+                    f"(error_type={type(disconnect_exc).__name__})",
+                    flush=True,
+                )
         try:
             if report is not None:
-                report_path = persist_execution_report(report, dry_run_only_override=True)
-                print(f"execution_report {report_path}", flush=True)
+                persist_reconciliation_report(report)
+                print("broker reconciliation report persisted", flush=True)
         except Exception as persist_exc:
-            print(f"failed to persist reconciliation report: {persist_exc}", flush=True)
+            print(
+                "failed to persist reconciliation report "
+                f"(error_type={type(persist_exc).__name__})",
+                flush=True,
+            )
 
 
 def _handle_monitor_dispatch():

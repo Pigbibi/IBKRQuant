@@ -371,3 +371,29 @@ def test_connect_ib_skips_trading_permission_probe_for_explicit_read_only_connec
     )
 
     assert adapters.connect_ib(validate_trading_permissions=False).managedAccounts() == ["U1234567"]
+
+
+def test_connect_ib_redacts_read_only_connection_diagnostics():
+    marker = "gateway.example.internal:4999 client_id=72 account=demo-account"
+    messages = []
+    adapters = _build_adapters()
+    adapters = adapters.__class__(
+        **{
+            **adapters.__dict__,
+            "host_resolver": lambda: "gateway.example.internal",
+            "ib_port": 4999,
+            "ib_client_id": 72,
+            "connect_ib_fn": lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError(marker)),
+            "printer": lambda message, **_kwargs: messages.append(message),
+        }
+    )
+
+    with pytest.raises(IBKRGatewayUnavailableError, match="read-only attempt") as exc_info:
+        adapters.connect_ib(redact_connection_diagnostics=True)
+
+    assert marker not in str(exc_info.value)
+    rendered = "\n".join(messages)
+    assert marker not in rendered
+    assert "gateway.example.internal" not in rendered
+    assert "4999" not in rendered
+    assert "client_id" not in rendered
