@@ -5,7 +5,10 @@ from quant_platform_kit.common.platform_runner.loader import (
     load_strategy_entrypoint_for_profile as _qpk_load_entrypoint,
 )
 from quant_platform_kit.common.strategies import StrategyDefinition
-from quant_platform_kit.strategy_contracts import StrategyEntrypoint, StrategyRuntimeAdapter
+from quant_platform_kit.common.strategy_contracts import (
+    StrategyEntrypoint,
+    StrategyRuntimeAdapter,
+)
 
 from strategy_registry import (
     IBKR_PLATFORM,

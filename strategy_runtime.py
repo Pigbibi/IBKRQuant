@@ -27,15 +27,17 @@ from quant_platform_kit.ibkr import (
     fetch_option_chain_snapshot,
     fetch_portfolio_snapshot,
 )
-from quant_platform_kit.strategy_contracts import (
+from quant_platform_kit.common.strategy_contracts import (
     StrategyDecision,
     StrategyEntrypoint,
     StrategyRuntimeAdapter,
     apply_runtime_policy_to_runtime_config,
     build_execution_timing_metadata,
+    build_strategy_context_from_available_inputs,
+)
+from quant_platform_kit.common.runtime_inputs import (
     build_account_state_from_portfolio_snapshot,
     build_portfolio_snapshot_from_account_state,
-    build_strategy_context_from_available_inputs,
     build_strategy_evaluation_inputs,
 )
 from runtime_config_support import PlatformRuntimeSettings

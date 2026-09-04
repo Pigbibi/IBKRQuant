@@ -14,7 +14,7 @@ for candidate in (ROOT, QPK_SRC, UES_SRC, HES_SRC):
 import strategy_runtime as strategy_runtime_module
 from quant_platform_kit.common.models import PortfolioSnapshot
 from quant_platform_kit.common.runtime_target import build_runtime_target
-from quant_platform_kit.strategy_contracts import (
+from quant_platform_kit.common.strategy_contracts import (
     PositionTarget,
     StrategyDecision,
     StrategyManifest,

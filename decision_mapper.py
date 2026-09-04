@@ -3,10 +3,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from quant_platform_kit.strategy_contracts import (
+from quant_platform_kit.common.strategy_contracts import (
     StrategyDecision,
     build_allocation_intent,
     build_allocation_payload,
+)
+from quant_platform_kit.common.execution_translation import (
     translate_decision_to_target_mode,
 )
 from strategy_registry import IBKR_PLATFORM, resolve_strategy_definition

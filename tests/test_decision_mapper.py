@@ -1,4 +1,7 @@
-from quant_platform_kit.strategy_contracts import PositionTarget, StrategyDecision
+from quant_platform_kit.common.strategy_contracts import (
+    PositionTarget,
+    StrategyDecision,
+)
 
 from decision_mapper import map_strategy_decision
 
