@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from quant_platform_kit.common.runtime_assembly import RuntimeAssembly
-from quant_platform_kit.strategy_contracts import build_execution_timing_metadata
+from quant_platform_kit.common.strategy_contracts import build_execution_timing_metadata
 from quant_platform_kit.common.runtime_target import RuntimeTarget
 from runtime_logging import RuntimeLogContext
 
