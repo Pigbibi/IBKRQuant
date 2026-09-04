@@ -78,7 +78,9 @@ def test_reconciliation_evidence_preserves_sanitized_log_query_failure_class() -
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
     assert 'logging_read_failures=0' in workflow
+    assert 'receipt_marker_seen=false' in workflow
     assert 'reconciliation_log_query_failed class=logging_read_nonzero_exit' in workflow
+    assert 'reconciliation_log_query_timeout class=receipt_request_id_mismatch' in workflow
     assert 'reconciliation_log_query_timeout class=no_matching_candidate' in workflow
     assert 'gcloud logging read' in workflow
     assert '--format=json 2>/dev/null' in workflow
