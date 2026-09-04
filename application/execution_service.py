@@ -1398,6 +1398,7 @@ def execute_rebalance(
     translator,
     strategy_symbols=None,
     signal_metadata=None,
+    acquire_execution_claim=None,
     strategy_profile=None,
     account_group=None,
     service_name=None,
@@ -1423,6 +1424,15 @@ def execute_rebalance(
 ):
     """Execute trades to reach target weights."""
     del target_weights
+    if not dry_run_only:
+        delegate_submit = submit_order_intent
+
+        def submit_claimed_order(ib, order_intent):
+            if acquire_execution_claim is None or not acquire_execution_claim():
+                raise RuntimeError("IBKR execution claim required; refusing broker submission")
+            return delegate_submit(ib, order_intent)
+
+        submit_order_intent = submit_claimed_order
     signal_metadata = signal_metadata or {}
     allocation = _resolve_weight_allocation(signal_metadata)
     target_weights = dict(allocation["targets"])
