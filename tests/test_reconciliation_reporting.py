@@ -74,6 +74,7 @@ def test_persistable_reconciliation_report_keeps_only_safe_evidence(tmp_path) ->
         },
         "diagnostics": {
             "broker_reconciliation": candidate,
+            "reconciliation_request_id": "853a2e08-9396-4fe8-89ee-59fb17e40a1d",
             "ib_gateway_host": marker,
         },
         "artifacts": {"strategy_config_path": marker},
@@ -93,6 +94,7 @@ def test_persistable_reconciliation_report_keeps_only_safe_evidence(tmp_path) ->
 
     assert result.local_path is not None
     assert payload["diagnostics"]["broker_reconciliation"] == candidate
+    assert payload["diagnostics"]["reconciliation_request_id"] == "853a2e08-9396-4fe8-89ee-59fb17e40a1d"
     assert payload["errors"] == [
         {
             "stage": "broker_reconciliation",
@@ -111,3 +113,25 @@ def test_persistable_reconciliation_report_keeps_only_safe_evidence(tmp_path) ->
     assert "runtime_target" not in payload
     assert "account_scope" not in payload
     assert "service_name" not in payload
+
+
+def test_persistable_reconciliation_report_rejects_untrusted_request_id() -> None:
+    report = {
+        "schema_version": "runtime_report.v1",
+        "platform": "ibkr",
+        "deploy_target": "cloud_run",
+        "strategy_profile": "global_etf_rotation",
+        "run_id": "run-001",
+        "run_source": "cloud_run",
+        "status": "ok",
+        "started_at": "2026-09-04T00:00:00Z",
+        "finished_at": "2026-09-04T00:01:00Z",
+        "summary": {},
+        "diagnostics": {"reconciliation_request_id": "unsafe value\nreport_uri=gs://x"},
+        "artifacts": {},
+        "errors": [],
+    }
+
+    sanitized = build_persistable_reconciliation_report(report)
+
+    assert "reconciliation_request_id" not in sanitized["diagnostics"]

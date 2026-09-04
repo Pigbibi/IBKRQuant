@@ -93,6 +93,7 @@ jobs:
           set -euo pipefail
           test -n "$SERVICE_URL"
           job_name="ibkr-reconcile-${PROFILE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          request_id="$(python -c 'import uuid; print(uuid.uuid4())')"
           requested_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           case "$PROFILE" in
             soxl_soxx_trend_income) delay_minutes=3 ;;
@@ -116,6 +117,7 @@ jobs:
             --time-zone 'Etc/UTC' \
             --uri "${SERVICE_URL}/reconcile" \
             --http-method POST \
+            --headers "X-QSL-Reconciliation-Request-Id=${request_id}" \
             --oidc-service-account-email "$GCP_SCHEDULER_SERVICE_ACCOUNT" \
             --oidc-token-audience "$SERVICE_URL" \
             --attempt-deadline '300s' \
@@ -124,6 +126,7 @@ jobs:
             --quiet >/dev/null
           {
             echo "job_name=$job_name"
+            echo "request_id=$request_id"
             echo "requested_at=$requested_at"
           } >> "$GITHUB_OUTPUT"
 
@@ -135,19 +138,19 @@ jobs:
         env:
           PROFILE: ${{ matrix.profile }}
           SERVICE: ${{ matrix.service }}
-          SERVICE_URL: ${{ steps.audience.outputs.service_url }}
+          REQUEST_ID: ${{ steps.scheduler.outputs.request_id }}
           REQUESTED_AT: ${{ steps.scheduler.outputs.requested_at }}
         run: |
           set -euo pipefail
-          test -n "$SERVICE_URL"
+          test -n "$REQUEST_ID"
           test -n "$REQUESTED_AT"
           mkdir -p reports
           log_entry=''
           logging_read_failures=0
-          for attempt in $(seq 1 96); do
+          for _ in $(seq 1 96); do
             logging_output=''
             logging_read_status=0
-            logging_output="$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND timestamp>=\"${REQUESTED_AT}\" AND textPayload:\"execution_report gs://\"" --project "$GCP_PROJECT_ID" --freshness=15m --limit=10 --format=json 2>/dev/null)" || logging_read_status=$?
+            logging_output="$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND timestamp>=\"${REQUESTED_AT}\" AND textPayload:\"reconciliation_receipt_ready request_id=${REQUEST_ID} report_uri=gs://\"" --project "$GCP_PROJECT_ID" --freshness=15m --limit=10 --format=json 2>/dev/null)" || logging_read_status=$?
             if [ "$logging_read_status" -ne 0 ]; then
               logging_read_failures=$((logging_read_failures + 1))
               sleep 5
@@ -157,7 +160,7 @@ jobs:
               echo "reconciliation_log_query_failed class=invalid_logging_json" >&2
               exit 1
             fi
-            log_entry="$(jq -c 'first(.[] | select(.textPayload? | startswith("execution_report gs://")) | select(.resource.labels.revision_name? | type == "string" and length > 0)) // empty' <<< "$logging_output")"
+            log_entry="$(jq -c --arg request_id "$REQUEST_ID" 'first(.[] | select(.textPayload? | type == "string") | select(.textPayload | startswith("reconciliation_receipt_ready request_id=" + $request_id + " report_uri=gs://")) | select(.resource.labels.revision_name? | type == "string" and length > 0)) // empty' <<< "$logging_output")"
             if [ -n "$log_entry" ]; then
               break
             fi
@@ -173,16 +176,18 @@ jobs:
             fi
             exit 1
           fi
-          report_uri="$(jq -er '.textPayload | capture("^execution_report (?<uri>gs://[^[:space:]]+)$").uri' <<< "$log_entry")"
+          receipt="$(jq -cer --arg request_id "$REQUEST_ID" '.textPayload | capture("^reconciliation_receipt_ready request_id=(?<request_id>[0-9a-f-]{36}) report_uri=(?<uri>gs://[^[:space:]]+)$") | select(.request_id == $request_id)' <<< "$log_entry")"
+          report_uri="$(jq -er '.uri' <<< "$receipt")"
           serving_revision="$(jq -er '.resource.labels.revision_name | select(type == "string" and length > 0)' <<< "$log_entry")"
           revision_labels="$(gcloud run revisions describe "$serving_revision" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='json(metadata.labels)')"
           service_revision_commit_sha="$(jq -er '."commit-sha" | select(type == "string" and test("^[0-9a-f]{40}$"))' <<< "$revision_labels")"
           service_deploy_run_id="$(jq -er '."github-run-id" | select(type == "string" and test("^[0-9]+$"))' <<< "$revision_labels")"
-          gcloud storage cat "$report_uri" | jq --arg profile "$PROFILE" '
+          gcloud storage cat "$report_uri" | jq --arg profile "$PROFILE" --arg request_id "$REQUEST_ID" '
             .diagnostics.broker_reconciliation as $candidate
             | {
                 schema_version: "ibkr_reconciliation_artifact.v1",
                 strategy_profile: $profile,
+                reconciliation_request_id: .diagnostics.reconciliation_request_id,
                 report_status: .status,
                 reconciliation: $candidate,
                 errors: [
@@ -194,9 +199,10 @@ jobs:
                 ]
               }
           ' > "reports/${PROFILE}.json"
-          jq -e --arg profile "$PROFILE" '
+          jq -e --arg profile "$PROFILE" --arg request_id "$REQUEST_ID" '
             .schema_version == "ibkr_reconciliation_artifact.v1"
             and .strategy_profile == $profile
+            and .reconciliation_request_id == $request_id
             and .reconciliation.schema_version == "ibkr_reconciliation_candidate.v1"
             and .reconciliation.evidence.platform_id == "ibkr"
             and .reconciliation.evidence.strategy_profile == $profile
