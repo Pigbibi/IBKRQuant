@@ -156,7 +156,12 @@ class IBKRRuntimeBrokerAdapters:
             ib.RaiseRequestErrors = original_raise_request_errors
             ib.RequestTimeout = original_request_timeout
 
-    def connect_ib(self, *, validate_trading_permissions: bool = True):
+    def connect_ib(
+        self,
+        *,
+        validate_trading_permissions: bool = True,
+        redact_connection_diagnostics: bool = False,
+    ):
         """Connect to the Gateway, optionally without an order-write permission probe.
 
         Account validation is safe and remains mandatory for every connection.
@@ -169,14 +174,21 @@ class IBKRRuntimeBrokerAdapters:
         last_error = None
         for attempt in range(1, self.connect_attempts + 1):
             client_id = self.ib_client_id + ((attempt - 1) * self.client_id_retry_offset)
-            self.printer(
-                "Connecting to IB gateway "
-                f"{host}:{self.ib_port} "
-                f"(client_id={client_id}, "
-                f"attempt={attempt}/{self.connect_attempts}, "
-                f"timeout={self.connect_timeout_seconds}s)",
-                flush=True,
-            )
+            if redact_connection_diagnostics:
+                self.printer(
+                    "Connecting to IB gateway "
+                    f"(read_only=true, attempt={attempt}/{self.connect_attempts})",
+                    flush=True,
+                )
+            else:
+                self.printer(
+                    "Connecting to IB gateway "
+                    f"{host}:{self.ib_port} "
+                    f"(client_id={client_id}, "
+                    f"attempt={attempt}/{self.connect_attempts}, "
+                    f"timeout={self.connect_timeout_seconds}s)",
+                    flush=True,
+                )
             try:
                 ib = self.connect_ib_fn(
                     host,
@@ -196,27 +208,47 @@ class IBKRRuntimeBrokerAdapters:
                 return ib
             except (ConnectionError, TimeoutError, OSError) as exc:
                 last_error = exc
-                self.printer(
-                    "IB gateway connection attempt failed "
-                    f"(attempt={attempt}/{self.connect_attempts}, "
-                    f"client_id={client_id}, "
-                    f"error_type={type(exc).__name__}, "
-                    f"error={exc})",
-                    flush=True,
-                )
+                if redact_connection_diagnostics:
+                    self.printer(
+                        "IB gateway read-only connection attempt failed "
+                        f"(attempt={attempt}/{self.connect_attempts}, "
+                        f"error_type={type(exc).__name__})",
+                        flush=True,
+                    )
+                else:
+                    self.printer(
+                        "IB gateway connection attempt failed "
+                        f"(attempt={attempt}/{self.connect_attempts}, "
+                        f"client_id={client_id}, "
+                        f"error_type={type(exc).__name__}, "
+                        f"error={exc})",
+                        flush=True,
+                    )
                 if attempt < self.connect_attempts:
                     if callable(self.refresh_host_fn):
                         try:
                             host = self.refresh_host_fn()
                         except Exception as refresh_exc:
-                            self.printer(
-                                "IB gateway host refresh failed; retrying last-known-good host "
-                                f"(host={host}, error_type={type(refresh_exc).__name__}, "
-                                f"error={refresh_exc})",
-                                flush=True,
-                            )
+                            if redact_connection_diagnostics:
+                                self.printer(
+                                    "IB gateway read-only host refresh failed "
+                                    f"(error_type={type(refresh_exc).__name__})",
+                                    flush=True,
+                                )
+                            else:
+                                self.printer(
+                                    "IB gateway host refresh failed; retrying last-known-good host "
+                                    f"(host={host}, error_type={type(refresh_exc).__name__}, "
+                                    f"error={refresh_exc})",
+                                    flush=True,
+                                )
                     if self.connect_retry_delay_seconds > 0:
                         self.sleep_fn(self.connect_retry_delay_seconds)
+        if redact_connection_diagnostics:
+            raise IBKRGatewayUnavailableError(
+                "IB gateway unavailable after "
+                f"{self.connect_attempts} read-only attempt(s)."
+            ) from last_error
         raise IBKRGatewayUnavailableError(
             "IB gateway unavailable after "
             f"{self.connect_attempts} attempt(s) to {host}:{self.ib_port}: {last_error}"
