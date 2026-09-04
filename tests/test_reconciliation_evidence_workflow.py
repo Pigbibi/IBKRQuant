@@ -82,3 +82,21 @@ def test_reconciliation_evidence_preserves_sanitized_log_query_failure_class() -
     assert 'reconciliation_log_query_timeout class=no_matching_candidate' in workflow
     assert 'gcloud logging read' in workflow
     assert '--format=json 2>/dev/null' in workflow
+
+
+def test_reconciliation_evidence_binds_scheduler_request_to_exact_receipt() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    required_markers = (
+        "request_id=\"$(python -c 'import uuid; print(uuid.uuid4())')\"",
+        "X-QSL-Reconciliation-Request-Id=${request_id}",
+        "echo \"request_id=$request_id\"",
+        "REQUEST_ID: ${{ steps.scheduler.outputs.request_id }}",
+        "reconciliation_receipt_ready request_id=${REQUEST_ID} report_uri=gs://",
+        "--arg request_id \"$REQUEST_ID\"",
+        ".reconciliation_request_id == $request_id",
+    )
+    for marker in required_markers:
+        assert marker in workflow
+
+    assert 'textPayload:\"execution_report gs://\"' not in workflow

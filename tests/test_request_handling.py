@@ -1446,7 +1446,11 @@ def test_handle_reconciliation_persists_and_logs_only_redacted_failure_fields(
 
     monkeypatch.setattr(strategy_module, "persist_execution_report", persist_report)
 
-    with strategy_module.app.test_request_context("/reconcile", method="POST"):
+    with strategy_module.app.test_request_context(
+        "/reconcile",
+        method="POST",
+        headers={"X-QSL-Reconciliation-Request-Id": "853a2e08-9396-4fe8-89ee-59fb17e40a1d"},
+    ):
         body, status = strategy_module.handle_reconciliation()
 
     assert (body, status) == ("Error", 503)
@@ -1457,6 +1461,9 @@ def test_handle_reconciliation_persists_and_logs_only_redacted_failure_fields(
             "failure_category": "broker_reconciliation",
         }
     ]
+    assert observed["report"]["diagnostics"]["reconciliation_request_id"] == (
+        "853a2e08-9396-4fe8-89ee-59fb17e40a1d"
+    )
     failed_event = observed["events"][-1]
     assert failed_event[0] == "broker_reconciliation_failed"
     assert "error_message" not in failed_event[1]
@@ -1465,7 +1472,12 @@ def test_handle_reconciliation_persists_and_logs_only_redacted_failure_fields(
     assert "demo-account" not in serialized
     output = capsys.readouterr().out
     assert marker not in output
-    assert output == "execution_report gs://private-reports/reconciliation.json\n"
+    assert output == (
+        "execution_report gs://private-reports/reconciliation.json\n"
+        "reconciliation_receipt_ready "
+        "request_id=853a2e08-9396-4fe8-89ee-59fb17e40a1d "
+        "report_uri=gs://private-reports/reconciliation.json\n"
+    )
 
 
 def test_handle_reconciliation_hides_disconnect_and_persistence_error_details(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import re
 from typing import Any
 
 _CANDIDATE_FIELDS = (
@@ -52,6 +53,19 @@ _REPORT_IDENTITY_FIELDS = (
     "started_at",
     "finished_at",
 )
+_RECONCILIATION_REQUEST_ID_PATTERN = re.compile(
+    r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
+)
+
+
+def normalize_reconciliation_request_id(value: object) -> str | None:
+    """Return a safe opaque correlation ID or reject the untrusted value."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if _RECONCILIATION_REQUEST_ID_PATTERN.fullmatch(normalized):
+        return normalized
+    return None
 
 
 def _selected_mapping(value: object, fields: tuple[str, ...]) -> dict[str, Any]:
@@ -89,6 +103,13 @@ def build_persistable_reconciliation_report(report: Mapping[str, object]) -> dic
     )
     if candidate:
         safe_report["diagnostics"]["broker_reconciliation"] = candidate
+    request_id = normalize_reconciliation_request_id(
+        (report.get("diagnostics") or {}).get("reconciliation_request_id")
+        if isinstance(report.get("diagnostics"), Mapping)
+        else None
+    )
+    if request_id:
+        safe_report["diagnostics"]["reconciliation_request_id"] = request_id
     failure = _selected_mapping(
         (report.get("diagnostics") or {}).get("broker_reconciliation_failure")
         if isinstance(report.get("diagnostics"), Mapping)
