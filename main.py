@@ -28,7 +28,10 @@ from application.broker_reconciliation import (
     build_reconciliation_candidate,
     collect_read_only_reconciliation_observations,
 )
-from application.reconciliation_reporting import build_persistable_reconciliation_report
+from application.reconciliation_reporting import (
+    build_persistable_reconciliation_report,
+    normalize_reconciliation_request_id,
+)
 from application.runtime_broker_adapters import (
     IBKRGatewayUnavailableError,
     IBKRTradingPermissionError,
@@ -1882,9 +1885,14 @@ def _handle_reconciliation():
     ib = None
     log_context = None
     report = None
+    reconciliation_request_id = normalize_reconciliation_request_id(
+        request.headers.get("X-QSL-Reconciliation-Request-Id")
+    )
     try:
         log_context = build_request_log_context()
         report = build_execution_report(log_context, dry_run_only_override=True)
+        if reconciliation_request_id is not None:
+            report.setdefault("diagnostics", {})["reconciliation_request_id"] = reconciliation_request_id
         runtime_target = RUNTIME_SETTINGS.runtime_target
         if runtime_target is None:
             raise IBKRReconciliationReadError(
@@ -1999,6 +2007,12 @@ def _handle_reconciliation():
                     and not any(character.isspace() for character in report_path)
                 ):
                     print(f"execution_report {report_path}", flush=True)
+                    if reconciliation_request_id is not None:
+                        print(
+                            "reconciliation_receipt_ready "
+                            f"request_id={reconciliation_request_id} report_uri={report_path}",
+                            flush=True,
+                        )
                 else:
                     print("broker reconciliation report persisted", flush=True)
         except Exception as persist_exc:
