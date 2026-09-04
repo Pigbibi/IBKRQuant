@@ -75,6 +75,7 @@ def test_persistable_reconciliation_report_keeps_only_safe_evidence(tmp_path) ->
         "diagnostics": {
             "broker_reconciliation": candidate,
             "reconciliation_request_id": "853a2e08-9396-4fe8-89ee-59fb17e40a1d",
+            "reconciliation_scheduler_job_sha256": "a" * 64,
             "ib_gateway_host": marker,
         },
         "artifacts": {"strategy_config_path": marker},
@@ -95,6 +96,7 @@ def test_persistable_reconciliation_report_keeps_only_safe_evidence(tmp_path) ->
     assert result.local_path is not None
     assert payload["diagnostics"]["broker_reconciliation"] == candidate
     assert payload["diagnostics"]["reconciliation_request_id"] == "853a2e08-9396-4fe8-89ee-59fb17e40a1d"
+    assert payload["diagnostics"]["reconciliation_scheduler_job_sha256"] == "a" * 64
     assert payload["errors"] == [
         {
             "stage": "broker_reconciliation",

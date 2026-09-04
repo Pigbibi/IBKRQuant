@@ -1,3 +1,4 @@
+import hashlib
 import json
 import types
 
@@ -1418,7 +1419,10 @@ def test_handle_reconciliation_persists_and_logs_only_redacted_failure_fields(
     with strategy_module.app.test_request_context(
         "/reconcile",
         method="POST",
-        headers={"X-QSL-Reconciliation-Request-Id": "853a2e08-9396-4fe8-89ee-59fb17e40a1d"},
+        headers={
+            "X-QSL-Reconciliation-Request-Id": "853a2e08-9396-4fe8-89ee-59fb17e40a1d",
+            "X-CloudScheduler-JobName": "projects/example/locations/example/jobs/reconcile-001",
+        },
     ):
         body, status = strategy_module.handle_reconciliation()
 
@@ -1444,8 +1448,11 @@ def test_handle_reconciliation_persists_and_logs_only_redacted_failure_fields(
     assert output == (
         "execution_report gs://private-reports/reconciliation.json\n"
         "reconciliation_receipt_ready "
-        "request_id=853a2e08-9396-4fe8-89ee-59fb17e40a1d "
-        "report_uri=gs://private-reports/reconciliation.json\n"
+        "scheduler_job_sha256="
+        + hashlib.sha256(
+            b"projects/example/locations/example/jobs/reconcile-001"
+        ).hexdigest()
+        + " report_uri=gs://private-reports/reconciliation.json\n"
     )
 
 
@@ -1494,7 +1501,13 @@ def test_handle_reconciliation_hides_disconnect_and_persistence_error_details(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(marker)),
     )
 
-    with strategy_module.app.test_request_context("/reconcile", method="POST"):
+    with strategy_module.app.test_request_context(
+        "/reconcile",
+        method="POST",
+        headers={
+            "X-CloudScheduler-JobName": "projects/example/locations/example/jobs/reconcile-001",
+        },
+    ):
         body, status = strategy_module.handle_reconciliation()
 
     assert (body, status) == ("Error", 503)
@@ -1502,3 +1515,22 @@ def test_handle_reconciliation_hides_disconnect_and_persistence_error_details(
     assert marker not in output
     assert "failed to disconnect IBKR reconciliation client (error_type=RuntimeError)" in output
     assert "failed to persist reconciliation report (error_type=RuntimeError)" in output
+
+
+def test_handle_reconciliation_rejects_missing_scheduler_identity_before_broker_connection(
+    strategy_module,
+    monkeypatch,
+):
+    broker_connection_attempts = []
+
+    monkeypatch.setattr(
+        strategy_module,
+        "connect_ib",
+        lambda **_kwargs: broker_connection_attempts.append(_kwargs),
+    )
+
+    with strategy_module.app.test_request_context("/reconcile", method="POST"):
+        body, response_code = strategy_module.handle_reconciliation()
+
+    assert (body, response_code) == ("Error", 400)
+    assert broker_connection_attempts == []
