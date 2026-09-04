@@ -92,11 +92,12 @@ def test_reconciliation_evidence_binds_scheduler_request_to_exact_receipt() -> N
         "X-QSL-Reconciliation-Request-Id=${request_id}",
         "echo \"request_id=$request_id\"",
         "REQUEST_ID: ${{ steps.scheduler.outputs.request_id }}",
-        "reconciliation_receipt_ready request_id=${REQUEST_ID} report_uri=gs://",
+        "reconciliation_receipt_ready request_id=\" + $request_id + \" report_uri=gs://",
         "--arg request_id \"$REQUEST_ID\"",
         ".reconciliation_request_id == $request_id",
     )
     for marker in required_markers:
         assert marker in workflow
 
-    assert 'textPayload:\"execution_report gs://\"' not in workflow
+    assert 'textPayload:\\\"reconciliation_receipt_ready\\\"' in workflow
+    assert 'textPayload:\\\"reconciliation_receipt_ready request_id=${REQUEST_ID}' not in workflow

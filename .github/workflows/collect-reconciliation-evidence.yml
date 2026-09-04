@@ -150,7 +150,7 @@ jobs:
           for _ in $(seq 1 96); do
             logging_output=''
             logging_read_status=0
-            logging_output="$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND timestamp>=\"${REQUESTED_AT}\" AND textPayload:\"reconciliation_receipt_ready request_id=${REQUEST_ID} report_uri=gs://\"" --project "$GCP_PROJECT_ID" --freshness=15m --limit=10 --format=json 2>/dev/null)" || logging_read_status=$?
+            logging_output="$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND timestamp>=\"${REQUESTED_AT}\" AND textPayload:\"reconciliation_receipt_ready\"" --project "$GCP_PROJECT_ID" --freshness=15m --limit=10 --format=json 2>/dev/null)" || logging_read_status=$?
             if [ "$logging_read_status" -ne 0 ]; then
               logging_read_failures=$((logging_read_failures + 1))
               sleep 5
