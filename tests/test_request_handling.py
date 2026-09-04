@@ -1362,3 +1362,129 @@ def test_handle_request_runtime_error_fallback_prefixes_account_scope(strategy_m
     assert status == 500
     assert body == "Error"
     assert sent_payloads[0][0]["text"].startswith("[U1234567] IBKR strategy run failed")
+
+
+def test_handle_reconciliation_persists_and_logs_only_redacted_failure_fields(
+    strategy_module,
+    monkeypatch,
+    capsys,
+):
+    marker = "gateway.example.internal:4999 client_id=72 account=demo-account /private/config.json"
+    observed = {"events": []}
+    raw_report = {
+        "schema_version": "runtime_report.v1",
+        "platform": "ibkr",
+        "deploy_target": "cloud_run",
+        "service_name": "private-service",
+        "strategy_profile": "global_etf_rotation",
+        "runtime_target": {"account_selector": ["demo-account"]},
+        "account_scope": "demo-account",
+        "account_group": "demo-account",
+        "project_id": "private-project",
+        "instance_name": marker,
+        "account_ids": ["demo-account"],
+        "run_id": "run-001",
+        "run_source": "cloud_run",
+        "status": "started",
+        "dry_run": True,
+        "started_at": "2026-09-04T00:00:00Z",
+        "finished_at": None,
+        "summary": {},
+        "diagnostics": {"ib_gateway_host": marker},
+        "artifacts": {"strategy_config_path": marker},
+        "errors": [],
+    }
+
+    monkeypatch.setattr(strategy_module, "build_request_log_context", lambda: types.SimpleNamespace(run_id="run-001"))
+    monkeypatch.setattr(strategy_module, "build_execution_report", lambda *_args, **_kwargs: raw_report)
+    monkeypatch.setattr(
+        strategy_module,
+        "connect_ib",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            strategy_module.IBKRGatewayUnavailableError(marker)
+        ),
+    )
+    monkeypatch.setattr(
+        strategy_module,
+        "log_runtime_event",
+        lambda _context, event, **fields: observed["events"].append((event, fields)),
+    )
+    monkeypatch.setattr(
+        strategy_module,
+        "persist_execution_report",
+        lambda report, **_kwargs: observed.setdefault("report", report),
+    )
+
+    with strategy_module.app.test_request_context("/reconcile", method="POST"):
+        body, status = strategy_module.handle_reconciliation()
+
+    assert (body, status) == ("Error", 503)
+    assert observed["report"]["errors"] == [
+        {
+            "stage": "broker_reconciliation",
+            "error_type": "IBKRGatewayUnavailableError",
+            "failure_category": "broker_reconciliation",
+        }
+    ]
+    failed_event = observed["events"][-1]
+    assert failed_event[0] == "broker_reconciliation_failed"
+    assert "error_message" not in failed_event[1]
+    serialized = json.dumps(observed, sort_keys=True)
+    assert marker not in serialized
+    assert "demo-account" not in serialized
+    assert marker not in capsys.readouterr().out
+
+
+def test_handle_reconciliation_hides_disconnect_and_persistence_error_details(
+    strategy_module,
+    monkeypatch,
+    capsys,
+):
+    marker = "gateway.example.internal:4999 client_id=72 account=demo-account /private/config.json"
+
+    class FakeIB:
+        def disconnect(self):
+            raise RuntimeError(marker)
+
+    monkeypatch.setattr(strategy_module, "build_request_log_context", lambda: types.SimpleNamespace(run_id="run-001"))
+    monkeypatch.setattr(
+        strategy_module,
+        "build_execution_report",
+        lambda *_args, **_kwargs: {
+            "schema_version": "runtime_report.v1",
+            "platform": "ibkr",
+            "deploy_target": "cloud_run",
+            "strategy_profile": "global_etf_rotation",
+            "run_id": "run-001",
+            "run_source": "cloud_run",
+            "status": "started",
+            "started_at": "2026-09-04T00:00:00Z",
+            "summary": {},
+            "diagnostics": {},
+            "artifacts": {},
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(strategy_module, "connect_ib", lambda **_kwargs: FakeIB())
+    monkeypatch.setattr(
+        strategy_module,
+        "collect_read_only_reconciliation_observations",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            strategy_module.IBKRReconciliationReadError(marker)
+        ),
+    )
+    monkeypatch.setattr(strategy_module, "log_runtime_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        strategy_module,
+        "persist_execution_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(marker)),
+    )
+
+    with strategy_module.app.test_request_context("/reconcile", method="POST"):
+        body, status = strategy_module.handle_reconciliation()
+
+    assert (body, status) == ("Error", 503)
+    output = capsys.readouterr().out
+    assert marker not in output
+    assert "failed to disconnect IBKR reconciliation client (error_type=RuntimeError)" in output
+    assert "failed to persist reconciliation report (error_type=RuntimeError)" in output
