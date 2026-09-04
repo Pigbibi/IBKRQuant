@@ -1992,8 +1992,15 @@ def _handle_reconciliation():
                 )
         try:
             if report is not None:
-                persist_reconciliation_report(report)
-                print("broker reconciliation report persisted", flush=True)
+                report_path = persist_reconciliation_report(report)
+                if (
+                    isinstance(report_path, str)
+                    and report_path.startswith("gs://")
+                    and not any(character.isspace() for character in report_path)
+                ):
+                    print(f"execution_report {report_path}", flush=True)
+                else:
+                    print("broker reconciliation report persisted", flush=True)
         except Exception as persist_exc:
             print(
                 "failed to persist reconciliation report "

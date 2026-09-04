@@ -1440,11 +1440,11 @@ def test_handle_reconciliation_persists_and_logs_only_redacted_failure_fields(
         "log_runtime_event",
         lambda _context, event, **fields: observed["events"].append((event, fields)),
     )
-    monkeypatch.setattr(
-        strategy_module,
-        "persist_execution_report",
-        lambda report, **_kwargs: observed.setdefault("report", report),
-    )
+    def persist_report(report, **_kwargs):
+        observed["report"] = report
+        return "gs://private-reports/reconciliation.json"
+
+    monkeypatch.setattr(strategy_module, "persist_execution_report", persist_report)
 
     with strategy_module.app.test_request_context("/reconcile", method="POST"):
         body, status = strategy_module.handle_reconciliation()
@@ -1463,7 +1463,9 @@ def test_handle_reconciliation_persists_and_logs_only_redacted_failure_fields(
     serialized = json.dumps(observed, sort_keys=True)
     assert marker not in serialized
     assert "demo-account" not in serialized
-    assert marker not in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert marker not in output
+    assert output == "execution_report gs://private-reports/reconciliation.json\n"
 
 
 def test_handle_reconciliation_hides_disconnect_and_persistence_error_details(
