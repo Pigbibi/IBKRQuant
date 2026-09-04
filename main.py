@@ -1,8 +1,10 @@
 """IBKR strategy runner for shared us_equity strategy profiles."""
 
+import hashlib
 import json
 import importlib
 import os
+import re
 import threading
 import time
 import traceback
@@ -31,6 +33,7 @@ from application.broker_reconciliation import (
 from application.reconciliation_reporting import (
     build_persistable_reconciliation_report,
     normalize_reconciliation_request_id,
+    normalize_reconciliation_scheduler_job_sha256,
 )
 from application.runtime_broker_adapters import (
     IBKRGatewayUnavailableError,
@@ -1879,18 +1882,37 @@ def _handle_probe(*, response_body: str = "Probe OK"):
             print(f"failed to persist execution report: {persist_exc}", flush=True)
 
 
+_SCHEDULER_JOB_NAME_PATTERN = re.compile(
+    r"projects/[A-Za-z0-9-]+/locations/[A-Za-z0-9-]+/jobs/[A-Za-z0-9_-]+"
+)
+
+
+def _scheduler_job_identity_sha256() -> str | None:
+    job_name = request.headers.get("X-CloudScheduler-JobName")
+    if not isinstance(job_name, str):
+        return None
+    normalized = job_name.strip()
+    if not _SCHEDULER_JOB_NAME_PATTERN.fullmatch(normalized):
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def _handle_reconciliation():
     """Build a read-only, fail-closed candidate for one frozen live baseline."""
 
     ib = None
     log_context = None
     report = None
+    scheduler_job_sha256 = _scheduler_job_identity_sha256()
+    if scheduler_job_sha256 is None:
+        return "Error", 400
     reconciliation_request_id = normalize_reconciliation_request_id(
         request.headers.get("X-QSL-Reconciliation-Request-Id")
     )
     try:
         log_context = build_request_log_context()
         report = build_execution_report(log_context, dry_run_only_override=True)
+        report.setdefault("diagnostics", {})["reconciliation_scheduler_job_sha256"] = scheduler_job_sha256
         if reconciliation_request_id is not None:
             report.setdefault("diagnostics", {})["reconciliation_request_id"] = reconciliation_request_id
         runtime_target = RUNTIME_SETTINGS.runtime_target
@@ -2007,12 +2029,11 @@ def _handle_reconciliation():
                     and not any(character.isspace() for character in report_path)
                 ):
                     print(f"execution_report {report_path}", flush=True)
-                    if reconciliation_request_id is not None:
-                        print(
-                            "reconciliation_receipt_ready "
-                            f"request_id={reconciliation_request_id} report_uri={report_path}",
-                            flush=True,
-                        )
+                    print(
+                        "reconciliation_receipt_ready "
+                        f"scheduler_job_sha256={scheduler_job_sha256} report_uri={report_path}",
+                        flush=True,
+                    )
                 else:
                     print("broker reconciliation report persisted", flush=True)
         except Exception as persist_exc:

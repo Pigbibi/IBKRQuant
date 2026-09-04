@@ -62,6 +62,7 @@ def test_reconciliation_evidence_records_receipt_source_without_self_reference()
         'service_revision',
         'service_revision_commit_sha',
         'service_deploy_run_id',
+        'scheduler_job_sha256',
     )
     for field in record_fields:
         assert f'--arg {field}' in workflow
@@ -80,26 +81,24 @@ def test_reconciliation_evidence_preserves_sanitized_log_query_failure_class() -
     assert 'logging_read_failures=0' in workflow
     assert 'receipt_marker_seen=false' in workflow
     assert 'reconciliation_log_query_failed class=logging_read_nonzero_exit' in workflow
-    assert 'reconciliation_log_query_timeout class=receipt_request_id_mismatch' in workflow
+    assert 'reconciliation_log_query_timeout class=receipt_scheduler_job_mismatch' in workflow
     assert 'reconciliation_log_query_timeout class=no_matching_candidate' in workflow
     assert 'gcloud logging read' in workflow
     assert '--format=json 2>/dev/null' in workflow
 
 
-def test_reconciliation_evidence_binds_scheduler_request_to_exact_receipt() -> None:
+def test_reconciliation_evidence_binds_scheduler_job_to_exact_receipt() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
     required_markers = (
-        "request_id=\"$(python -c 'import uuid; print(uuid.uuid4())')\"",
-        "X-QSL-Reconciliation-Request-Id=${request_id}",
-        "echo \"request_id=$request_id\"",
-        "REQUEST_ID: ${{ steps.scheduler.outputs.request_id }}",
-        "reconciliation_receipt_ready request_id=\" + $request_id + \" report_uri=gs://",
-        "--arg request_id \"$REQUEST_ID\"",
-        ".reconciliation_request_id == $request_id",
+        "scheduler_job_config=\"$(gcloud scheduler jobs describe",
+        "scheduler_job_sha256=\"$(printf '%s' \"$scheduler_job_identity\" | sha256sum",
+        "SCHEDULER_JOB_SHA256: ${{ steps.scheduler.outputs.scheduler_job_sha256 }}",
+        "scheduler_job_sha256=\" + $scheduler_job_sha256 + \" report_uri=gs://",
+        "--arg scheduler_job_sha256 \"$SCHEDULER_JOB_SHA256\"",
+        ".reconciliation_scheduler_job_sha256 == $scheduler_job_sha256",
     )
     for marker in required_markers:
         assert marker in workflow
 
-    assert 'textPayload:\\\"reconciliation_receipt_ready\\\"' in workflow
-    assert 'textPayload:\\\"reconciliation_receipt_ready request_id=${REQUEST_ID}' not in workflow
+    assert 'textPayload:\\"reconciliation_receipt_ready\\"' in workflow

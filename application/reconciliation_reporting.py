@@ -56,6 +56,7 @@ _REPORT_IDENTITY_FIELDS = (
 _RECONCILIATION_REQUEST_ID_PATTERN = re.compile(
     r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
 )
+_RECONCILIATION_SCHEDULER_JOB_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 def normalize_reconciliation_request_id(value: object) -> str | None:
@@ -64,6 +65,15 @@ def normalize_reconciliation_request_id(value: object) -> str | None:
         return None
     normalized = value.strip().lower()
     if _RECONCILIATION_REQUEST_ID_PATTERN.fullmatch(normalized):
+        return normalized
+    return None
+
+
+def normalize_reconciliation_scheduler_job_sha256(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if _RECONCILIATION_SCHEDULER_JOB_SHA256_PATTERN.fullmatch(normalized):
         return normalized
     return None
 
@@ -110,6 +120,13 @@ def build_persistable_reconciliation_report(report: Mapping[str, object]) -> dic
     )
     if request_id:
         safe_report["diagnostics"]["reconciliation_request_id"] = request_id
+    scheduler_job_sha256 = normalize_reconciliation_scheduler_job_sha256(
+        (report.get("diagnostics") or {}).get("reconciliation_scheduler_job_sha256")
+        if isinstance(report.get("diagnostics"), Mapping)
+        else None
+    )
+    if scheduler_job_sha256:
+        safe_report["diagnostics"]["reconciliation_scheduler_job_sha256"] = scheduler_job_sha256
     failure = _selected_mapping(
         (report.get("diagnostics") or {}).get("broker_reconciliation_failure")
         if isinstance(report.get("diagnostics"), Mapping)
