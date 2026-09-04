@@ -1346,6 +1346,7 @@ def execute_rebalance(
     *,
     strategy_symbols=None,
     signal_metadata=None,
+    acquire_execution_claim=None,
     dry_run_only_override: bool | None = None,
 ):
     return build_broker_adapters(dry_run_only_override=dry_run_only_override).execute_rebalance(
@@ -1355,6 +1356,7 @@ def execute_rebalance(
         account_values,
         strategy_symbols=strategy_symbols,
         signal_metadata=signal_metadata,
+        acquire_execution_claim=acquire_execution_claim,
     )
 
 

@@ -965,7 +965,6 @@ def run_strategy_core(
         execution_marker_key = _build_execution_marker_key(config=config, signal_metadata=signal_metadata)
         execution_state_store = getattr(config, "execution_state_store", None)
         execution_already_recorded = False
-        execution_claim_acquired = False
         if execution_marker_key and execution_state_store:
             try:
                 execution_already_recorded = bool(execution_state_store.has_marker(execution_marker_key))
@@ -995,24 +994,6 @@ def run_strategy_core(
                         f"Execution report dedup read failed\nMarker: {execution_marker_key}\n{type(exc).__name__}: {exc}",
                         flush=True,
                     )
-
-        if (
-            not execution_already_recorded
-            and execution_marker_key
-            and execution_state_store
-            and bool(getattr(config, "execution_dedup_enabled", False))
-            and not bool(getattr(config, "dry_run_only", False))
-        ):
-            try:
-                execution_claim_acquired = bool(execution_state_store.claim_marker(
-                    execution_marker_key,
-                    metadata={"platform": "ibkr", "strategy_profile": signal_metadata.get("strategy_profile")},
-                ))
-                execution_already_recorded = not execution_claim_acquired
-            except Exception as exc:
-                raise RuntimeError(
-                    f"IBKR execution claim unavailable; refusing broker submission: {type(exc).__name__}"
-                ) from exc
 
         if execution_already_recorded:
             message = _execution_already_recorded_message(config=config, signal_metadata=signal_metadata)
@@ -1069,6 +1050,29 @@ def run_strategy_core(
                 reconciliation_record_path=str(record_path),
             )
 
+        execution_claim_attempted = False
+        execution_claim_acquired = False
+
+        def acquire_execution_claim():
+            nonlocal execution_claim_attempted, execution_claim_acquired
+            # No-op cycles never claim; a failed attempt cannot retry on another intent.
+            if not execution_claim_attempted:
+                execution_claim_attempted = True
+                if (
+                    not config.dry_run_only
+                    and config.execution_dedup_enabled
+                    and execution_marker_key
+                    and execution_state_store is not None
+                ):
+                    try:
+                        execution_claim_acquired = bool(execution_state_store.claim_marker(
+                            execution_marker_key,
+                            metadata={"platform": "ibkr", "strategy_profile": signal_metadata.get("strategy_profile")},
+                        ))
+                    except Exception:
+                        raise RuntimeError("IBKR execution claim unavailable; refusing broker submission") from None
+            return execution_claim_acquired
+
         execution_result = runtime.execute_rebalance(
             ib,
             resolved_target_weights,
@@ -1076,6 +1080,7 @@ def run_strategy_core(
             account_values,
             strategy_symbols=allocation.get("strategy_symbols"),
             signal_metadata=signal_metadata,
+            acquire_execution_claim=acquire_execution_claim,
         )
         if isinstance(execution_result, tuple) and len(execution_result) == 2:
             trade_logs, execution_summary = execution_result

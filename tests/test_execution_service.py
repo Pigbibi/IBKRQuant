@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from application.execution_service import check_order_submitted, execute_rebalance, get_available_buying_power
 from notifications.telegram import build_translator
 from quant_platform_kit.common.models import OrderIntent
@@ -159,6 +161,7 @@ def test_execute_rebalance_submits_limit_buy_for_underweight_position(monkeypatc
         fetch_quote_snapshots=fake_fetch_quote_snapshots,
         submit_order_intent=fake_submit_order_intent,
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=translate,
         strategy_symbols=["VOO", "BIL"],
         strategy_profile="tech_communication_pullback_enhancement",
@@ -186,6 +189,30 @@ def test_execute_rebalance_submits_limit_buy_for_underweight_position(monkeypatc
     assert submitted[0].symbol == "VOO"
     assert submitted[0].order_type == "limit"
     assert any(log.startswith("buy VOO") for log in trade_logs)
+
+
+@pytest.mark.parametrize("claim", [None, lambda: False])
+def test_execute_rebalance_cannot_submit_without_successful_claim_callback(tmp_path, claim):
+    submitted = []
+    ib = SimpleNamespace(
+        openTrades=lambda: [],
+        accountValues=lambda: [SimpleNamespace(tag="AvailableFunds", currency="USD", value="1000")],
+    )
+    with pytest.raises(RuntimeError, match="execution claim required"):
+        execute_rebalance(
+            ib, {"VOO": 0.5}, {}, {"equity": 1000.0, "buying_power": 1000.0},
+            fetch_quote_snapshots=lambda _ib, symbols: {
+                symbol: SimpleNamespace(last_price=100.0) for symbol in symbols
+            },
+            submit_order_intent=lambda _ib, intent: submitted.append(intent),
+            order_intent_cls=OrderIntent, translator=translate,
+            signal_metadata=_signal_metadata({"VOO": 0.5}, risk_symbols=("VOO",)),
+            acquire_execution_claim=claim, dry_run_only=False,
+            cash_reserve_ratio=0.0, rebalance_threshold_ratio=0.02,
+            limit_buy_premium=1.0, sell_settle_delay_sec=0,
+            execution_lock_dir=tmp_path,
+        )
+    assert submitted == []
 
 
 def test_execute_rebalance_paper_admission_blocks_before_calling_the_broker(tmp_path):
@@ -273,6 +300,7 @@ def test_execute_rebalance_blocks_when_all_order_submissions_are_rejected(tmp_pa
             status="Rejected",
         ),
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=translate,
         strategy_symbols=["VOO"],
         strategy_profile="tech_communication_pullback_enhancement",
@@ -324,6 +352,7 @@ def test_execute_rebalance_uses_symbol_specific_limit_buy_premium(monkeypatch, t
         },
         submit_order_intent=fake_submit_order_intent,
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=translate,
         strategy_symbols=["SOXL"],
         strategy_profile="soxl_soxx_trend_income",
@@ -649,6 +678,7 @@ def test_execute_rebalance_live_cash_only_reuses_projected_sell_proceeds_when_ca
         },
         submit_order_intent=fake_submit_order_intent,
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=build_translator("zh"),
         strategy_symbols=["SOXL", "SOXX"],
         strategy_profile="soxl_soxx_trend_income",
@@ -708,6 +738,7 @@ def test_execute_rebalance_live_cash_only_does_not_bridge_unfilled_sell_submissi
         },
         submit_order_intent=fake_submit_order_intent,
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=build_translator("zh"),
         strategy_symbols=["SOXL", "SOXX"],
         strategy_profile="soxl_soxx_trend_income",
@@ -770,6 +801,7 @@ def test_execute_rebalance_live_cash_only_uses_partial_fill_proceeds_and_fill_pr
         },
         submit_order_intent=fake_submit_order_intent,
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=build_translator("zh"),
         strategy_symbols=["SOXL", "SOXX"],
         strategy_profile="soxl_soxx_trend_income",
@@ -1000,6 +1032,7 @@ def test_execute_rebalance_routes_order_to_single_account_id(monkeypatch, tmp_pa
         },
         submit_order_intent=fake_submit_order_intent,
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=translate,
         strategy_symbols=["TQQQ"],
         strategy_profile="tqqq_growth_income",
@@ -1078,6 +1111,7 @@ def test_execute_rebalance_zero_target_sell_uses_position_quantity(monkeypatch, 
         fetch_quote_snapshots=lambda *_args, **_kwargs: {"VOO": SimpleNamespace(last_price=165.85)},
         submit_order_intent=fake_submit_order_intent,
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=translate,
         strategy_symbols=["VOO"],
         strategy_profile="global_etf_rotation",
@@ -1129,6 +1163,7 @@ def test_execute_rebalance_keeps_existing_whole_share_when_positive_target_is_un
         },
         submit_order_intent=fake_submit_order_intent,
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=translate,
         strategy_symbols=["TQQQ", "QQQM"],
         strategy_profile="tqqq_growth_income",
@@ -1457,6 +1492,7 @@ def test_execute_rebalance_blocks_same_day_repeat_via_execution_lock(tmp_path, m
         fetch_quote_snapshots=fake_fetch_quote_snapshots,
         submit_order_intent=lambda *_args, **_kwargs: SimpleNamespace(broker_order_id="1", status="Submitted"),
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=translate,
         strategy_symbols=["VOO", "BOXX"],
         strategy_profile="tech_communication_pullback_enhancement",
@@ -1576,6 +1612,7 @@ def test_execute_rebalance_returns_structured_summary_when_requested(monkeypatch
         fetch_quote_snapshots=fake_fetch_quote_snapshots,
         submit_order_intent=lambda *_args, **_kwargs: SimpleNamespace(broker_order_id="1", status="Submitted"),
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=translate,
         strategy_symbols=["VOO", "BOXX"],
         strategy_profile="tech_communication_pullback_enhancement",
@@ -1705,6 +1742,7 @@ def test_execute_rebalance_sells_cash_sweep_symbol_when_buying_power_is_short(mo
         },
         submit_order_intent=fake_submit_order_intent,
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=translate,
         strategy_symbols=["VOO", "BOXX"],
         strategy_profile="tech_communication_pullback_enhancement",
@@ -1901,6 +1939,7 @@ def test_execute_rebalance_uses_price_fallbacks_for_live_when_quotes_missing(mon
         fetch_quote_snapshots=lambda *_args, **_kwargs: {},
         submit_order_intent=fake_submit_order_intent,
         order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: True,
         translator=translate,
         strategy_symbols=["VOO"],
         strategy_profile="tech_communication_pullback_enhancement",

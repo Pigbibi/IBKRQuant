@@ -1,4 +1,13 @@
 import json
+from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+from application.execution_service import execute_rebalance
+from application.runtime_broker_adapters import build_runtime_broker_adapters
+from quant_platform_kit.common.execution_state import ExecutionMarkerStore
 
 from application.rebalance_service import (
     _resolve_reconciliation_mode,
@@ -357,6 +366,7 @@ def test_run_strategy_core_passes_signal_metadata_to_execution():
         *,
         strategy_symbols=None,
         signal_metadata=None,
+        acquire_execution_claim=None,
     ):
         observed["strategy_symbols"] = strategy_symbols
         observed["signal_metadata"] = signal_metadata
@@ -750,3 +760,183 @@ def test_run_strategy_core_prefers_structured_noop_status_in_zh():
 
     assert result.result == "OK - no-op"
     assert observed["messages"] == []
+
+
+@pytest.fixture
+def claim_cycle(tmp_path, monkeypatch, strategy_module):
+    submitted = []
+    metadata = {
+        "strategy_profile": "global_etf_rotation",
+        "effective_date": "2026-04-01",
+        "allocation": _weight_allocation({"VOO": 0.5}, risk_symbols=("VOO",)),
+    }
+    ib = SimpleNamespace(
+        isConnected=lambda: True, disconnect=lambda: None,
+        openTrades=lambda: [], fills=lambda: [],
+        accountValues=lambda: [SimpleNamespace(tag="AvailableFunds", currency="USD", value="1000")],
+    )
+    config = IBKRRebalanceConfig(
+        translator=_build_test_translator(), separator="---",
+        strategy_profile="global_etf_rotation", execution_state_account_scope="PAPER",
+        reconciliation_output_path=tmp_path / "reconciliation.json",
+        notify_no_trade_cycles=False,
+    )
+    store = ExecutionMarkerStore(local_dir=tmp_path / "markers")
+
+    def submit(_ib, intent):
+        submitted.append(intent)
+        return SimpleNamespace(broker_order_id="synthetic-order", status="Submitted")
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("unexpected adapter operation")
+
+    def execute_with_observed_claim(*args, **kwargs):
+        state.claim_callback = kwargs.get("acquire_execution_claim")
+        return execute_rebalance(*args, execution_lock_dir=tmp_path / "locks", **kwargs)
+
+    adapters = build_runtime_broker_adapters(
+        host_resolver=unexpected, ib_port=4002, ib_client_id=1,
+        connect_timeout_seconds=1, connect_attempts=1, connect_retry_delay_seconds=0,
+        client_id_retry_offset=1, ensure_event_loop_fn=unexpected, connect_ib_fn=unexpected,
+        fetch_portfolio_snapshot_fn=unexpected,
+        fetch_quote_snapshots_fn=lambda _ib, symbols: {
+            symbol: SimpleNamespace(last_price=100.0) for symbol in symbols
+        },
+        submit_order_intent_fn=submit, application_get_market_prices_fn=unexpected,
+        application_check_order_submitted_fn=unexpected,
+        application_execute_rebalance_fn=execute_with_observed_claim,
+        execute_paper_liquidation_fn=unexpected,
+        translator=_build_test_translator(), strategy_profile="global_etf_rotation",
+        account_group="synthetic-paper", service_name=None, account_ids=(),
+        dry_run_only=False, cash_reserve_ratio=0.0, cash_reserve_floor_usd=0.0,
+        rebalance_threshold_ratio=0.02, limit_buy_premium=1.0,
+        quantity_step=1.0, min_order_notional=10.0,
+        safe_haven_cash_substitute_threshold_usd=0.0, sell_settle_delay_sec=0,
+        separator="---", strategy_display_name="Synthetic", sleep_fn=unexpected,
+    )
+    state = SimpleNamespace(
+        submitted=submitted, metadata=metadata, store=store, config=config,
+        adapters=adapters, positions={}, target_weights={"VOO": 0.5},
+    )
+    monkeypatch.setattr(strategy_module, "build_broker_adapters", lambda **_kwargs: state.adapters)
+
+    def run(**overrides):
+        return run_strategy_core(
+            connect_ib=lambda: ib,
+            get_current_portfolio=lambda _ib: (state.positions, {"equity": 1000.0, "buying_power": 1000.0}),
+            compute_signals=lambda *_args: (state.target_weights, "synthetic", False, "", state.metadata),
+            execute_rebalance=strategy_module.execute_rebalance,
+            send_tg_message=lambda _message: None,
+            config=replace(state.config, **overrides),
+        )
+
+    state.run = run
+    return state
+
+
+@pytest.mark.parametrize("case", ["default", "disabled", "no_store", "empty_key", "false", "exception"])
+@pytest.mark.parametrize("side", ["buy", "sell"])
+def test_cycle_requires_claim_before_actual_submit(claim_cycle, case, side):
+    state = claim_cycle
+    if side == "sell":
+        state.positions = {"VOO": {"quantity": 5, "avg_cost": 100.0}}
+        state.metadata["allocation"] = _weight_allocation({"VOO": 0.0}, risk_symbols=("VOO",))
+    overrides = {}
+    if case != "default":
+        overrides = {"execution_dedup_enabled": True, "execution_state_store": state.store}
+    if case == "disabled":
+        overrides["execution_dedup_enabled"] = False
+    elif case == "no_store":
+        overrides["execution_state_store"] = None
+    elif case == "empty_key":
+        state.metadata.pop("effective_date")
+    elif case in {"false", "exception"}:
+        store = Mock(spec=("has_marker", "claim_marker", "record_marker"))
+        store.has_marker.return_value = False
+        store.claim_marker.side_effect = [False if case == "false" else RuntimeError("synthetic failure"), True]
+        overrides["execution_state_store"] = store
+    error = None
+    try:
+        state.run(**overrides)
+    except RuntimeError as exc:
+        error = exc
+    assert state.submitted == []
+    assert error is not None and "execution claim" in str(error)
+    if case in {"false", "exception"}:
+        # A caller catching the first failure must not reclaim on its next intent.
+        assert state.claim_callback() is False
+        assert state.claim_callback() is False
+        assert store.claim_marker.call_count == 1
+        store.record_marker.assert_not_called()
+
+
+def test_cycle_success_claim_precedes_one_submit_and_blocks_repeat(claim_cycle):
+    state = claim_cycle
+    from application.rebalance_service import _build_execution_marker_key
+
+    config = replace(state.config, execution_dedup_enabled=True)
+    key = _build_execution_marker_key(config=config, signal_metadata=state.metadata)
+    submit = state.adapters.submit_order_intent_fn
+
+    def checked_submit(ib, intent):
+        assert state.store.has_marker(key)
+        return submit(ib, intent)
+
+    state.adapters = replace(state.adapters, submit_order_intent_fn=checked_submit)
+    result = state.run(execution_dedup_enabled=True, execution_state_store=state.store)
+    assert len(state.submitted) == 1, result.execution_summary.get("no_op_reason")
+    state.run(execution_dedup_enabled=True, execution_state_store=state.store)
+    assert len(state.submitted) == 1
+    assert (state.submitted[0].symbol, state.submitted[0].side, state.submitted[0].quantity) == ("VOO", "buy", 5)
+
+
+def test_cycle_unknown_submission_retains_claim_after_store_reopen(claim_cycle):
+    state = claim_cycle
+
+    def accepted_then_timeout(_ib, intent):
+        state.submitted.append(intent)
+        raise TimeoutError("synthetic uncertain submission")
+
+    state.adapters = replace(state.adapters, submit_order_intent_fn=accepted_then_timeout)
+    with pytest.raises(TimeoutError):
+        state.run(execution_dedup_enabled=True, execution_state_store=state.store)
+    reopened = ExecutionMarkerStore(local_dir=state.store.local_dir)
+    result = state.run(execution_dedup_enabled=True, execution_state_store=reopened)
+    assert result.execution_summary["no_op_reason"] == "execution_already_recorded"
+    assert len(state.submitted) == 1
+
+
+def test_cycle_distinct_orders_share_one_successful_claim(claim_cycle):
+    state = claim_cycle
+    state.metadata["allocation"] = _weight_allocation(
+        {"VOO": 0.3, "SPY": 0.3}, risk_symbols=("VOO", "SPY"),
+    )
+    store = Mock(spec=("has_marker", "claim_marker", "record_marker"), wraps=state.store)
+    state.run(execution_dedup_enabled=True, execution_state_store=store)
+    assert {intent.symbol for intent in state.submitted} == {"VOO", "SPY"}
+    assert len(state.submitted) == 2
+    assert store.claim_marker.call_count == 1
+
+
+@pytest.mark.parametrize("case", ["dry_run", "empty_plan", "no_signal", "admission_rejected"])
+def test_cycle_non_submission_paths_do_not_claim(claim_cycle, case):
+    state = claim_cycle
+    store = Mock(spec=("has_marker", "claim_marker", "record_marker"))
+    store.has_marker.return_value = False
+    store.claim_marker.side_effect = RuntimeError("claim must not run")
+    if case == "dry_run":
+        state.config = replace(state.config, dry_run_only=True)
+        state.adapters = replace(state.adapters, dry_run_only=True)
+    elif case == "empty_plan":
+        state.metadata["allocation"] = _weight_allocation({"VOO": 0.0}, risk_symbols=("VOO",))
+    elif case == "no_signal":
+        state.target_weights = None
+    else:
+        state.adapters = replace(state.adapters, paper_execution_admission_enabled=True)
+    result = state.run(execution_dedup_enabled=True, execution_state_store=store)
+    assert state.submitted == []
+    store.claim_marker.assert_not_called()
+    if case == "dry_run":
+        assert result.execution_summary["orders_submitted"][0]["status"] == "dry_run"
+    elif case == "admission_rejected":
+        assert result.execution_summary["execution_status"] == "blocked"
