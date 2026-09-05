@@ -41,3 +41,28 @@ def test_cloud_run_deploy_is_private_internal_and_serial() -> None:
         "--concurrency=1",
     ):
         assert option in deploy_block
+
+
+def test_lifecycle_refreshes_after_successful_or_failed_deploy() -> None:
+    workflow = Path(".github/workflows/runtime-target-lifecycle.yml").read_text(encoding="utf-8")
+    deploy = Path(".github/workflows/sync-cloud-run-env.yml").read_text(encoding="utf-8")
+    deploy_name = deploy.splitlines()[0].removeprefix("name: ")
+
+    assert f"  workflow_run:\n    workflows: [\"{deploy_name}\"]\n    types: [completed]" in workflow
+    assert "github.event.workflow_run.conclusion" not in workflow
+    assert "gh workflow run" not in workflow
+    assert "gcloud run deploy" not in workflow
+    assert "gcloud scheduler jobs resume" not in workflow
+    assert "gcloud scheduler jobs pause" not in workflow
+
+
+def test_lifecycle_observes_the_exact_existing_service_binding() -> None:
+    workflow = Path(".github/workflows/runtime-target-lifecycle.yml").read_text(encoding="utf-8")
+    publish = workflow.split("      - name: Publish lifecycle to the unified control plane", 1)[1]
+    publish = publish.split("      - name:", 1)[0]
+
+    assert 'observe-gcp: "true"' in publish
+    assert "gcp-project: ${{ env.GCP_PROJECT_ID }}" in publish
+    assert "cloud-run-region: ${{ env.CLOUD_RUN_REGION }}" in publish
+    assert "cloud-run-service: ${{ matrix.target.service }}" in publish
+    assert "scheduler-location: ${{ env.RUNTIME_HEARTBEAT_SCHEDULER_LOCATION }}" in publish

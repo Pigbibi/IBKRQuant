@@ -2,6 +2,9 @@ name: Runtime Target Lifecycle
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Deploy Cloud Run"]
+    types: [completed]
   schedule:
     - cron: "42 * * * *"
 
@@ -186,7 +189,7 @@ jobs:
 
       - name: Publish lifecycle to the unified control plane
         if: ${{ steps.lifecycle_ingress.outputs.enabled == 'true' }}
-        uses: QuantStrategyLab/QuantRuntimeSettings/actions/publish-runtime-target-lifecycle@769616e9b0a21b9c9f40173b87d5f3e09bbdca9e
+        uses: QuantStrategyLab/QuantRuntimeSettings/actions/publish-runtime-target-lifecycle@c2e46314fd749fd40f4d5fbdbaedadc8b7b27dff
         with:
           source-id: ibkr.${{ matrix.target.id }}
           target-id: ibkr.${{ matrix.target.id }}
@@ -195,6 +198,11 @@ jobs:
           execution-mode: ${{ steps.target_state.outputs.execution_mode }}
           runtime-guard: ${{ steps.runtime_guard.outputs.status }}
           execution-heartbeat: ${{ steps.execution_heartbeat.outputs.status }}
+          observe-gcp: "true"
+          gcp-project: ${{ env.GCP_PROJECT_ID }}
+          cloud-run-region: ${{ env.CLOUD_RUN_REGION }}
+          cloud-run-service: ${{ matrix.target.service }}
+          scheduler-location: ${{ env.RUNTIME_HEARTBEAT_SCHEDULER_LOCATION }}
           sync-url: ${{ env.EXECUTION_EVIDENCE_SYNC_URL }}
         env:
           EXECUTION_EVIDENCE_SYNC_TOKEN: ${{ secrets.EXECUTION_EVIDENCE_SYNC_TOKEN }}
