@@ -2,7 +2,8 @@
 """Build or explicitly publish a redacted IBKR legacy-recovery source snapshot.
 
 This bridge consumes a private QPK baseline candidate and the private result
-of AIAuditBridge's mandatory ``reconciliation_baseline`` review. By default it
+of optional advisory ``reconciliation_baseline`` review, plus independently
+designated private source records. By default it
 only prints the minimal console snapshot. It never opens an IBKR session,
 changes a runtime target, writes an execution marker, or submits an order.
 
@@ -16,12 +17,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from application.broker_reconciliation_candidate import (
+    SourceReceiptExpectation, validate_reconciliation_candidate_sources,
+)
+from scripts.build_reconciliation_baseline_candidate import load_source_inputs
 
 from quant_platform_kit.common.broker_reconciliation_enrollment import (
     BrokerReconciliationBaselineCandidate,
@@ -64,7 +70,9 @@ def _sha256(value: object, *, field_name: str) -> str:
     return normalized
 
 
-def extract_baseline_candidate(payload: Mapping[str, Any]) -> BrokerReconciliationBaselineCandidate:
+def extract_baseline_candidate(payload: Mapping[str, Any], *,
+                               source_receipt_records: Sequence[Mapping[str, object]],
+                               expectations: Sequence[SourceReceiptExpectation]) -> BrokerReconciliationBaselineCandidate:
     """Load only a ready, QPK-validated candidate from the local receipt tool."""
 
     if payload.get("schema_version") != "ibkr_reconciliation_baseline_enrollment.v1":
@@ -74,13 +82,16 @@ def extract_baseline_candidate(payload: Mapping[str, Any]) -> BrokerReconciliati
     candidate = payload.get("candidate")
     if not isinstance(candidate, Mapping):
         raise ValueError("baseline candidate is missing its QPK candidate")
-    return BrokerReconciliationBaselineCandidate.from_dict(candidate)
+    return validate_reconciliation_candidate_sources(
+        BrokerReconciliationBaselineCandidate.from_dict(candidate),
+        source_receipt_records=source_receipt_records, expectations=expectations,
+    )
 
 
 def _secondary_reviewer_count(value: object) -> int:
     if not isinstance(value, Mapping):
         return 0
-    # The mandatory trigger currently uses Codex primary plus GPT and Claude.
+    # Count actual returned review records, not required model votes.
     # A legacy independent secondary reviewer still counts as one; primary is
     # counted separately by extract_bound_dual_review.
     if all(isinstance(value.get(name), Mapping) for name in ("gpt", "claude")):
@@ -89,23 +100,23 @@ def _secondary_reviewer_count(value: object) -> int:
 
 
 def extract_bound_dual_review(
-    payload: Mapping[str, Any],
+    payload: Mapping[str, Any] | None,
     *,
     candidate: BrokerReconciliationBaselineCandidate,
 ) -> ReconciliationRecoveryDualReview:
-    """Convert the strict AIAuditBridge receipt to QPK's minimum binding.
+    """Preserve an optional advisory result and its candidate binding.
 
     Generic approval JSON is deliberately rejected. The later private
     controller independently rechecks the full receipt; this output is only a
     redacted, operator-facing source row.
     """
 
+    if payload is None:
+        return ReconciliationRecoveryDualReview("unavailable", 0, candidate.candidate_sha256)
     if str(payload.get("trigger") or "").strip() != "reconciliation_baseline":
         raise ValueError("dual review must use the reconciliation_baseline trigger")
     if str(payload.get("strategy_profile") or "").strip() != candidate.strategy_profile:
         raise ValueError("dual review strategy_profile does not match the candidate")
-    if payload.get("escalated") is not True:
-        raise ValueError("dual review did not run the mandatory multi-review path")
     if payload.get("requires_human_recovery_approval") is not True:
         raise ValueError("dual review is missing its human recovery approval requirement")
     authority = payload.get("recovery_authority")
@@ -129,8 +140,6 @@ def extract_bound_dual_review(
     reviewer_count = int(isinstance(payload.get("primary_review"), Mapping)) + _secondary_reviewer_count(
         payload.get("secondary_review")
     )
-    if reviewer_count < 2:
-        raise ValueError("dual review requires a primary and independent secondary reviewer")
     return ReconciliationRecoveryDualReview(
         outcome=outcome,
         reviewer_count=reviewer_count,
@@ -141,14 +150,16 @@ def extract_bound_dual_review(
 def build_recovery_source_snapshot(
     *,
     candidate_payload: Mapping[str, Any],
-    dual_review_payload: Mapping[str, Any],
+    source_receipt_records: Sequence[Mapping[str, object]],
+    expectations: Sequence[SourceReceiptExpectation],
+    dual_review_payload: Mapping[str, Any] | None = None,
     recovery_id: str,
     source_id: str = "ibkr.reconciliation_recovery",
     now: datetime | None = None,
 ) -> dict[str, object]:
     """Return the exact QRS ingress payload, without a network side effect."""
 
-    candidate = extract_baseline_candidate(candidate_payload)
+    candidate = extract_baseline_candidate(candidate_payload, source_receipt_records=source_receipt_records, expectations=expectations)
     dual_review = extract_bound_dual_review(dual_review_payload, candidate=candidate)
     reference_now = now or datetime.now(timezone.utc)
     record = build_reconciliation_recovery_record(
@@ -184,11 +195,13 @@ def build_private_evidence_package(
     *,
     snapshot: Mapping[str, object],
     candidate_payload: Mapping[str, Any],
-    dual_review_payload: Mapping[str, Any],
+    source_receipt_records: Sequence[Mapping[str, object]],
+    expectations: Sequence[SourceReceiptExpectation],
+    dual_review_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     """Package private inputs for the later verifier, never for QRS ingress."""
 
-    candidate = extract_baseline_candidate(candidate_payload)
+    candidate = extract_baseline_candidate(candidate_payload, source_receipt_records=source_receipt_records, expectations=expectations)
     extract_bound_dual_review(dual_review_payload, candidate=candidate)
     recoveries = snapshot.get("recoveries")
     if not isinstance(recoveries, list) or len(recoveries) != 1 or not isinstance(recoveries[0], Mapping):
@@ -202,7 +215,7 @@ def build_private_evidence_package(
         "candidate_sha256": candidate.candidate_sha256,
         "source_snapshot": dict(snapshot),
         "baseline_candidate": dict(candidate_payload),
-        "dual_review": dict(dual_review_payload),
+        "dual_review": dict(dual_review_payload) if dual_review_payload is not None else None,
     }
 
 
@@ -326,7 +339,9 @@ def main(argv: list[str] | None = None) -> int:
         description="Build or explicitly publish a redacted, non-authorising IBKR recovery source snapshot."
     )
     parser.add_argument("--candidate", type=Path, required=True, help="Private output from build_reconciliation_baseline_candidate.py")
-    parser.add_argument("--dual-review", type=Path, required=True, help="Private AIAuditBridge reconciliation_baseline result")
+    parser.add_argument("--dual-review", type=Path, help="Optional private advisory review result")
+    parser.add_argument("--source-records", type=Path, required=True)
+    parser.add_argument("--source-expectations", type=Path, required=True)
     parser.add_argument("--recovery-id", required=True, help="Opaque legacy runtime recovery identifier")
     parser.add_argument("--source-id", default="ibkr.reconciliation_recovery")
     parser.add_argument("--now", help="Optional ISO-8601 time used for deterministic validation")
@@ -340,9 +355,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
+        records, expectations = load_source_inputs(args.source_records, args.source_expectations)
         snapshot = build_recovery_source_snapshot(
             candidate_payload=_load_json(args.candidate, label="baseline candidate"),
-            dual_review_payload=_load_json(args.dual_review, label="dual review"),
+            dual_review_payload=_load_json(args.dual_review, label="dual review") if args.dual_review else None,
+            source_receipt_records=records, expectations=expectations,
             recovery_id=args.recovery_id,
             source_id=args.source_id,
             now=_parse_time(args.now),
@@ -353,7 +370,8 @@ def main(argv: list[str] | None = None) -> int:
                 build_private_evidence_package(
                     snapshot=snapshot,
                     candidate_payload=_load_json(args.candidate, label="baseline candidate"),
-                    dual_review_payload=_load_json(args.dual_review, label="dual review"),
+                    dual_review_payload=_load_json(args.dual_review, label="dual review") if args.dual_review else None,
+                    source_receipt_records=records, expectations=expectations,
                 ),
                 private_evidence_uri=args.archive_gcs_uri,
             )

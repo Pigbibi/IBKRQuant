@@ -44,12 +44,39 @@ def _payload(*, observed_at: datetime, **overrides: object) -> dict[str, object]
     }
 
 
+
+def _sources_for_evidences(evidences):
+    """Synthetic independently designated records, never broker observations."""
+    from dataclasses import asdict
+    from application.broker_reconciliation_candidate import SourceReceiptExpectation, SOURCE_RECEIPT_RECORD_SCHEMA_VERSION
+    expectations = []
+    records = []
+    for index, evidence in enumerate(evidences, start=1):
+        expectation = SourceReceiptExpectation(
+            strategy_profile=evidence.strategy_profile,
+            repository="QuantStrategyLab/InteractiveBrokersPlatform",
+            workflow_path=".github/workflows/collect-reconciliation-evidence.yml",
+            workflow_ref="refs/heads/main", workflow_conclusion="success",
+            workflow_run_id=str(index), workflow_run_attempt="1", workflow_head_sha="c" * 40,
+            artifact_id=str(index), artifact_name=f"ibkr-reconciliation-{evidence.strategy_profile}-{index}",
+            artifact_sha256="d" * 64, evidence_sha256=evidence.evidence_sha256,
+            service_name="synthetic-service", service_revision="synthetic-revision",
+            service_revision_commit_sha="e" * 40, service_deploy_run_id="100",
+        )
+        expectations.append(expectation)
+        record = asdict(expectation)
+        for key in ("strategy_profile", "workflow_ref", "workflow_conclusion"):
+            record.pop(key)
+        records.append({"schema_version": SOURCE_RECEIPT_RECORD_SCHEMA_VERSION, **record})
+    return {"source_receipt_records": records, "expectations": tuple(expectations)}
+
+
 def test_builds_redacted_review_candidate_from_two_matching_receipts() -> None:
     start = datetime(2026, 8, 30, 8, 0, tzinfo=timezone.utc)
-    result = evaluate_receipts(
-        [_payload(observed_at=start), _payload(observed_at=start + timedelta(minutes=2))],
-        now=start + timedelta(minutes=3),
-    )
+    reconciled = dict.fromkeys(("positions_match", "cash_match", "open_orders_match", "recent_executions_match", "local_execution_ledger_match"), True)
+    payloads = [_payload(observed_at=start, **reconciled), _payload(observed_at=start + timedelta(minutes=2), **reconciled)]
+    result = evaluate_receipts(payloads, now=start + timedelta(minutes=3),
+                              **_sources_for_evidences([extract_reconciliation_evidence(item) for item in payloads]))
 
     assert result["ready_for_independent_review"] is True
     assert result["findings"] == []
@@ -61,13 +88,9 @@ def test_builds_redacted_review_candidate_from_two_matching_receipts() -> None:
 
 def test_rejects_mismatched_receipts_without_authorisation() -> None:
     start = datetime(2026, 8, 30, 8, 0, tzinfo=timezone.utc)
-    result = evaluate_receipts(
-        [
-            _payload(observed_at=start),
-            _payload(observed_at=start + timedelta(minutes=2), cash_sha256=_digest("9")),
-        ],
-        now=start + timedelta(minutes=3),
-    )
+    payloads = [_payload(observed_at=start), _payload(observed_at=start + timedelta(minutes=2), cash_sha256=_digest("9"))]
+    result = evaluate_receipts(payloads, now=start + timedelta(minutes=3),
+                              **_sources_for_evidences([extract_reconciliation_evidence(item) for item in payloads]))
 
     assert result == {
         "schema_version": "ibkr_reconciliation_baseline_enrollment.v1",

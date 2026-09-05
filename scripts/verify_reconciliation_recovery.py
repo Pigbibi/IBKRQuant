@@ -2,7 +2,7 @@
 """Verify one confirmed IBKR legacy-recovery request without applying it.
 
 The verifier is a private-control-plane building block.  It reads the bounded
-QRS confirmation endpoint, a full AIAuditBridge mandatory review receipt, a
+QRS confirmation endpoint, optional advisory review, designated source records, a
 private QPK baseline candidate, the currently deployed runtime target, and a
 new read-only ``/reconcile`` receipt.  It only returns a QPK transition *plan*
 when every value agrees; it never updates Cloud Run, a runtime target, a
@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,7 +27,8 @@ from quant_platform_kit.common.reconciliation_recovery import (
     evaluate_reconciliation_recovery_activation,
 )
 
-from scripts.build_reconciliation_baseline_candidate import extract_reconciliation_evidence
+from application.broker_reconciliation_candidate import SourceReceiptExpectation
+from scripts.build_reconciliation_baseline_candidate import extract_reconciliation_evidence, load_source_inputs
 from scripts.publish_reconciliation_recovery_source import (
     _load_json,
     _parse_time,
@@ -151,8 +152,9 @@ def _verify_console_response(
         raise ValueError("controller confirmation candidate binding mismatch")
     if str(recovery.get("dual_review_binding_sha256") or "").strip().lower() != candidate.candidate_sha256:
         raise ValueError("controller confirmation dual review binding mismatch")
-    if int(recovery.get("evidence_sample_count") or 0) < 2:
-        raise ValueError("controller confirmation evidence sample count is insufficient")
+    count = recovery.get("evidence_sample_count")
+    if type(count) is not int or count != len(candidate.source_evidence_sha256):
+        raise ValueError("controller confirmation evidence sample count does not match candidate")
     confirmation = payload.get("confirmation")
     if not isinstance(confirmation, Mapping):
         raise ValueError("controller confirmation response is missing confirmation")
@@ -162,7 +164,9 @@ def _verify_console_response(
 def verify_reconciliation_recovery(
     *,
     candidate_payload: Mapping[str, Any],
-    dual_review_payload: Mapping[str, Any],
+    source_receipt_records: Sequence[Mapping[str, object]],
+    expectations: Sequence[SourceReceiptExpectation],
+    dual_review_payload: Mapping[str, Any] | None = None,
     confirmation_payload: Mapping[str, Any],
     current_receipt_payload: Mapping[str, Any],
     runtime_target_payload: Mapping[str, Any],
@@ -175,10 +179,9 @@ def verify_reconciliation_recovery(
     this function intentionally has no broker, Cloud Run, or state-write port.
     """
 
-    candidate = extract_baseline_candidate(candidate_payload)
-    # Re-parse and validate the full audit receipt rather than trusting the
-    # redacted QRS source. The return value is intentionally discarded: its
-    # successful construction is the independent binding proof for this step.
+    candidate = extract_baseline_candidate(candidate_payload, source_receipt_records=source_receipt_records, expectations=expectations)
+    # Validate any supplied advisory receipt without treating model votes as
+    # source verification or authority. Missing review never fabricates approval.
     extract_bound_dual_review(dual_review_payload, candidate=candidate)
     confirmation = _verify_console_response(
         confirmation_payload,
@@ -193,7 +196,6 @@ def verify_reconciliation_recovery(
         confirmation=confirmation,
         current_evidence=current_evidence,
         current_live_continuity_state=continuity_state,
-        dual_review_binding_reverified=True,
         now=now or datetime.now(timezone.utc),
     )
     findings = tuple(dict.fromkeys((*target_findings, *evaluation.findings)))
@@ -220,7 +222,9 @@ def main(argv: list[str] | None = None) -> int:
         description="Verify a confirmed IBKR legacy recovery without changing broker or runtime state."
     )
     parser.add_argument("--candidate", type=Path, required=True, help="Private QPK baseline-candidate output")
-    parser.add_argument("--dual-review", type=Path, required=True, help="Private full AIAuditBridge dual-review output")
+    parser.add_argument("--dual-review", type=Path, help="Optional private advisory review result")
+    parser.add_argument("--source-records", type=Path, required=True)
+    parser.add_argument("--source-expectations", type=Path, required=True)
     parser.add_argument("--current-receipt", type=Path, required=True, help="Fresh post-confirmation private /reconcile receipt")
     parser.add_argument("--runtime-target", type=Path, required=True, help="Read-only deployed RUNTIME_TARGET_JSON snapshot")
     parser.add_argument("--confirmation-url", required=True, help="QRS private controller-read HTTPS endpoint")
@@ -228,6 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--now", help="Optional ISO-8601 time used for deterministic validation")
     args = parser.parse_args(argv)
     try:
+        records, expectations = load_source_inputs(args.source_records, args.source_expectations)
         confirmation = read_console_confirmation(
             confirmation_url=args.confirmation_url,
             recovery_id=args.recovery_id,
@@ -235,7 +240,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         result = verify_reconciliation_recovery(
             candidate_payload=_load_json(args.candidate, label="baseline candidate"),
-            dual_review_payload=_load_json(args.dual_review, label="dual review"),
+            dual_review_payload=_load_json(args.dual_review, label="dual review") if args.dual_review else None,
+            source_receipt_records=records, expectations=expectations,
             confirmation_payload=confirmation,
             current_receipt_payload=_load_json(args.current_receipt, label="current reconciliation receipt"),
             runtime_target_payload=_load_json(args.runtime_target, label="runtime target"),

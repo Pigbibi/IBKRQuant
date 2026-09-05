@@ -4,9 +4,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from quant_platform_kit.common.broker_reconciliation import build_broker_reconciliation_evidence
-from quant_platform_kit.common.broker_reconciliation_enrollment import (
-    evaluate_broker_reconciliation_baseline_enrollment,
-)
+from scripts.build_reconciliation_baseline_candidate import evaluate_receipts
+from tests.test_reconciliation_baseline_candidate_script import _sources_for_evidences
 from quant_platform_kit.common.reconciliation_recovery import (
     calculate_reconciliation_recovery_confirmation_sha256,
 )
@@ -46,17 +45,16 @@ def _evidence(*, observed_at: datetime) -> object:
 
 
 def _candidate_payload(start: datetime) -> dict[str, object]:
-    enrollment = evaluate_broker_reconciliation_baseline_enrollment(
-        [_evidence(observed_at=start), _evidence(observed_at=start + timedelta(minutes=2))],
-        now=start + timedelta(minutes=3),
+    observations = [_evidence(observed_at=start), _evidence(observed_at=start + timedelta(minutes=2))]
+    return evaluate_receipts(
+        [{"evidence": item.to_dict()} for item in observations], now=start + timedelta(minutes=3),
+        **_sources_for_evidences(observations),
     )
-    assert enrollment.candidate is not None
-    return {
-        "schema_version": "ibkr_reconciliation_baseline_enrollment.v1",
-        "ready_for_independent_review": True,
-        "findings": [],
-        "candidate": enrollment.candidate.to_dict(),
-    }
+
+
+def _candidate_source_inputs(start):
+    return _sources_for_evidences([_evidence(observed_at=start), _evidence(observed_at=start + timedelta(minutes=2))])
+
 
 
 def _dual_review(candidate_sha256: str) -> dict[str, object]:
@@ -139,6 +137,7 @@ def test_verify_only_returns_a_plan_without_attempting_state_write() -> None:
 
     result = verify_reconciliation_recovery(
         candidate_payload=candidate,
+        **_candidate_source_inputs(start),
         dual_review_payload=_dual_review(candidate_sha256),
         confirmation_payload=_console_response(candidate_sha256, confirmed_at=start + timedelta(minutes=3)),
         current_receipt_payload={"evidence": _evidence(observed_at=start + timedelta(minutes=4)).to_dict()},
@@ -167,6 +166,7 @@ def test_verify_only_keeps_plan_closed_when_deployed_target_is_not_reconcile_onl
 
     result = verify_reconciliation_recovery(
         candidate_payload=candidate,
+        **_candidate_source_inputs(start),
         dual_review_payload=_dual_review(candidate_sha256),
         confirmation_payload=_console_response(candidate_sha256, confirmed_at=start + timedelta(minutes=3)),
         current_receipt_payload={"evidence": _evidence(observed_at=start + timedelta(minutes=4)).to_dict()},
@@ -190,6 +190,7 @@ def test_verify_only_rejects_a_current_receipt_with_confirmation_second_timestam
 
     result = verify_reconciliation_recovery(
         candidate_payload=candidate,
+        **_candidate_source_inputs(start),
         dual_review_payload=_dual_review(candidate_sha256),
         confirmation_payload=_console_response(candidate_sha256, confirmed_at=confirmed_at),
         current_receipt_payload={"evidence": _evidence(observed_at=confirmed_at).to_dict()},
@@ -235,3 +236,75 @@ def test_read_console_confirmation_uses_dedicated_bearer_header() -> None:
     request = received["request"]
     assert getattr(request, "get_header")("Authorization") == "Bearer controller-token"
     assert "recovery_id=ibkr-soxl-live-recovery" in getattr(request, "full_url")
+
+
+def test_single_source_three_cli_path_needs_no_model_review(tmp_path, monkeypatch, capsys):
+    from dataclasses import asdict
+    from scripts import build_reconciliation_baseline_candidate as builder
+    from scripts import publish_reconciliation_recovery_source as publisher
+    from scripts import verify_reconciliation_recovery as verifier
+
+    start = datetime(2026, 8, 31, 1, 0, tzinfo=timezone.utc)
+    evidence = _evidence(observed_at=start)
+    sources = _sources_for_evidences([evidence])
+
+    def save(name, value):
+        path = tmp_path / name
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return str(path)
+
+    source_args = [
+        "--source-records", save("records.json", sources["source_receipt_records"]),
+        "--source-expectations", save("expectations.json", [asdict(item) for item in sources["expectations"]]),
+    ]
+    assert builder.main([
+        "--receipt", save("receipt.json", {"evidence": evidence.to_dict()}),
+        "--now", start.isoformat(), *source_args,
+    ]) == 0
+    candidate = json.loads(capsys.readouterr().out)
+    candidate_path = save("candidate.json", candidate)
+    digest = candidate["candidate"]["candidate_sha256"]
+    assert candidate["candidate"]["schema_version"] == "broker_reconciliation_baseline_candidate.v2"
+    assert publisher.main([
+        "--candidate", candidate_path, "--recovery-id", "ibkr-soxl-live-recovery",
+        "--now", start.isoformat(), *source_args,
+    ]) == 0
+    snapshot = json.loads(capsys.readouterr().out)
+    record = snapshot["recoveries"][0]
+    assert record["readiness"] == "awaiting_human_confirmation"
+    assert record["evidence_sample_count"] == 1
+    assert record["dual_review"] == {"outcome": "unavailable", "reviewer_count": 0, "evidence_binding_sha256": digest}
+
+    response = _console_response(digest, confirmed_at=start + timedelta(minutes=1))
+    response["recovery"]["evidence_sample_count"] = 1
+    monkeypatch.setattr(verifier, "read_console_confirmation", lambda **_kwargs: response)
+    assert verifier.main([
+        "--candidate", candidate_path, "--recovery-id", "ibkr-soxl-live-recovery",
+        "--current-receipt", save("current.json", {"evidence": _evidence(observed_at=start + timedelta(minutes=2)).to_dict()}),
+        "--runtime-target", save("runtime.json", _runtime_target()),
+        "--confirmation-url", "https://console.example/api/internal/reconciliation-recovery-confirmation",
+        "--now", (start + timedelta(minutes=3)).isoformat(), *source_args,
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["ready_for_atomic_state_transition"]
+    assert result["transition_plan"]["no_order"] is True
+    assert result["transition_plan"]["execution_authority_granted"] is False
+    assert result["transition_plan"]["requires_atomic_compare_and_set"] is True
+    assert result["policy"]["state_write_attempted"] is False
+
+
+def test_verifier_rejects_console_sample_count_not_matching_candidate():
+    import pytest
+    start = datetime(2026, 8, 31, 1, 0, tzinfo=timezone.utc)
+    candidate = _candidate_payload(start)
+    digest = candidate["candidate"]["candidate_sha256"]
+    response = _console_response(digest, confirmed_at=start + timedelta(minutes=3))
+    response["recovery"]["evidence_sample_count"] = 1
+    with pytest.raises(ValueError, match="sample count"):
+        verify_reconciliation_recovery(
+            candidate_payload=candidate, **_candidate_source_inputs(start),
+            confirmation_payload=response,
+            current_receipt_payload={"evidence": _evidence(observed_at=start + timedelta(minutes=4)).to_dict()},
+            runtime_target_payload=_runtime_target(), recovery_id="ibkr-soxl-live-recovery",
+            now=start + timedelta(minutes=5),
+        )

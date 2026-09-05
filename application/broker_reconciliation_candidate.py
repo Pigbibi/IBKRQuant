@@ -109,8 +109,8 @@ def _canonical_workflow_path(value: object) -> str:
 def _normalize_expectations(
     expectations: Sequence[SourceReceiptExpectation],
 ) -> dict[str, dict[str, str]]:
-    if len(expectations) != 2:
-        raise ValueError("exactly two audit-designated source receipts are required")
+    if not expectations:
+        raise ValueError("at least one designated source receipt is required")
     normalized: dict[str, dict[str, str]] = {}
     for expectation in expectations:
         if type(expectation) is not SourceReceiptExpectation:
@@ -242,13 +242,13 @@ def canonical_source_receipt_records_json(
     strategy_profile: str,
     expectations: Sequence[SourceReceiptExpectation],
 ) -> str:
-    """Validate and canonically serialize exactly two redacted source records."""
+    """Validate and canonically serialize designated redacted source records."""
 
     profile = _canonical_text(strategy_profile, field_name="strategy_profile")
     expected_by_artifact = _normalize_expectations(expectations)
     normalized = tuple(_normalize_source_record(record) for record in records)
-    if len(normalized) != 2:
-        raise ValueError("exactly two source receipt records are required")
+    if not normalized:
+        raise ValueError("at least one source receipt record is required")
     if len({_source_record_key(record) for record in normalized}) != len(normalized):
         raise ValueError("source receipt artifact/run pairs must be unique")
     if {record["artifact_id"] for record in normalized} != set(expected_by_artifact):
@@ -280,7 +280,7 @@ def calculate_source_receipts_sha256(
     strategy_profile: str,
     expectations: Sequence[SourceReceiptExpectation],
 ) -> str:
-    """Return the root binding two validated, redacted source records."""
+    """Bind validated source content; the caller must independently verify its origin."""
 
     return hashlib.sha256(
         canonical_source_receipt_records_json(
@@ -319,6 +319,7 @@ def build_reconciliation_candidate_v2(
         strategy_profile=normalized_candidate.strategy_profile,
         expectations=expectations,
     )
+    _validate_evidence_members(normalized_candidate, records)
     payload: dict[str, Any] = normalized_candidate.to_dict()
     payload["schema_version"] = (
         BROKER_RECONCILIATION_BASELINE_CANDIDATE_V2_SCHEMA_VERSION
@@ -331,7 +332,41 @@ def build_reconciliation_candidate_v2(
     return BrokerReconciliationBaselineCandidate.from_dict(payload)
 
 
+def _validate_evidence_members(
+    candidate: BrokerReconciliationBaselineCandidate,
+    records: Sequence[Mapping[str, object]],
+) -> None:
+    members = [record.get("evidence_sha256") for record in records]
+    if sorted(members) != sorted(candidate.source_evidence_sha256):
+        raise ValueError("source records must match candidate evidence members exactly")
+
+
+def validate_reconciliation_candidate_sources(
+    candidate: BrokerReconciliationBaselineCandidate,
+    *,
+    source_receipt_records: Iterable[Mapping[str, object]],
+    expectations: Sequence[SourceReceiptExpectation],
+) -> BrokerReconciliationBaselineCandidate:
+    """Recheck private source content against independently designated expectations.
+
+    These inputs bind provenance, not accounting completeness or live authority.
+    The caller must obtain expectations independently of untrusted candidate data.
+    """
+    candidate = BrokerReconciliationBaselineCandidate.from_dict(candidate.to_dict())
+    if candidate.schema_version != BROKER_RECONCILIATION_BASELINE_CANDIDATE_V2_SCHEMA_VERSION:
+        raise ValueError("a source-bound v2 candidate is required")
+    records = tuple(source_receipt_records)
+    root = calculate_source_receipts_sha256(
+        records, strategy_profile=candidate.strategy_profile, expectations=expectations,
+    )
+    _validate_evidence_members(candidate, records)
+    if root != candidate.source_receipts_sha256:
+        raise ValueError("candidate source receipts binding mismatch")
+    return candidate
+
+
 __all__ = [
+    "validate_reconciliation_candidate_sources",
     "SOURCE_RECEIPT_RECORD_SCHEMA_VERSION",
     "SourceReceiptExpectation",
     "build_reconciliation_candidate_v2",
