@@ -134,6 +134,140 @@ def test_get_available_buying_power_does_not_treat_total_cash_value_as_currency_
     assert get_available_buying_power(FakeIB(), 0.0, currency="USD") == 0.0
 
 
+@pytest.mark.parametrize("symbol", ["SOXL", "VOO"])
+@pytest.mark.parametrize(
+    "held,target_value,step,premium,buying_power,reserve,expected_quantity",
+    [
+        (0, 90, 1.0, 1.0, 1000, 0, 0),
+        (1, 190, 1.0, 1.0, 900, 0, 0),
+        (0, 100, 1.0, 1.01, 1000, 0, 0),
+        (0, 250, 1.0, 1.0, 1000, 0, 2),
+        (1, 350, 1.0, 1.0, 900, 0, 2),
+        (0, 90, 0.1, 1.0, 1000, 0, 0.9),
+        (1, 190, 0.1, 1.0, 900, 0, 0.9),
+        (0, 250, 1.0, 1.0, 500, 400, 0),
+        (0, 250, 1.0, 1.0, 650, 400, 2),
+    ],
+)
+def test_execute_rebalance_never_expands_approved_buy_budget(
+    tmp_path, symbol, held, target_value, step, premium, buying_power, reserve,
+    expected_quantity,
+):
+    class FakeIB:
+        def openTrades(self):
+            return []
+
+        def fills(self):
+            return []
+
+        def accountValues(self):
+            return [SimpleNamespace(tag="CashBalance", currency="USD", value=str(buying_power))]
+
+    submitted = []
+    claims = []
+    targets = {symbol: target_value / (1000 - reserve)}
+    metadata = _signal_metadata(targets, risk_symbols=(symbol,), trade_date="2026-09-05")
+
+    def submit(_ib, intent):
+        submitted.append(intent)
+        return SimpleNamespace(broker_order_id="synthetic-order", status="Submitted")
+
+    _logs, summary = execute_rebalance(
+        FakeIB(), {}, {symbol: {"quantity": held}},
+        {"equity": 1000.0, "buying_power": buying_power},
+        fetch_quote_snapshots=lambda _ib, symbols: {
+            item: SimpleNamespace(last_price=100.0) for item in symbols
+        },
+        submit_order_intent=submit,
+        order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: claims.append(True) or True,
+        translator=translate,
+        strategy_profile="synthetic-switchable-profile",
+        signal_metadata=metadata,
+        dry_run_only=False,
+        cash_reserve_ratio=0.0,
+        cash_reserve_floor_usd=reserve,
+        rebalance_threshold_ratio=0.0,
+        limit_buy_premium=premium,
+        quantity_step=step,
+        sell_settle_delay_sec=0,
+        execution_lock_dir=tmp_path,
+        return_summary=True,
+    )
+
+    assert [(intent.side, intent.quantity) for intent in submitted] == (
+        [("buy", expected_quantity)] if expected_quantity else []
+    )
+    assert len(claims) == len(submitted)
+    assert metadata["allocation"]["targets"] == targets
+    assert summary["small_account_whole_share_bootstrap_symbols"] == []
+    assert summary["small_account_existing_whole_share_retained_symbols"] == []
+    row = next(row for row in summary["target_vs_current"] if row["symbol"] == symbol)
+    assert row["target_weight"] <= targets[symbol]
+    for intent in submitted:
+        assert intent.quantity * intent.limit_price <= target_value - held * 100 + 1e-9
+        assert intent.quantity * intent.limit_price <= (buying_power - reserve) * 0.95 + 1e-9
+
+
+@pytest.mark.parametrize("symbol", ["TQQQ", "VOO"])
+@pytest.mark.parametrize(
+    "held,target_value,expected_quantity",
+    [(1, 90, 1), (7, 90, 7), (7, 0, 7), (7, 250, 4), (1, 100, 0)],
+)
+def test_execute_rebalance_reductions_follow_approved_target_without_retention_lift(
+    monkeypatch, tmp_path, symbol, held, target_value, expected_quantity,
+):
+    class FakeIB:
+        def openTrades(self):
+            return []
+
+        def fills(self):
+            return []
+
+        def accountValues(self):
+            return [SimpleNamespace(tag="CashBalance", currency="USD", value="1000")]
+
+    submitted = []
+    claims = []
+    monkeypatch.setattr("application.execution_service.time.sleep", lambda _seconds: None)
+
+    _logs, summary = execute_rebalance(
+        FakeIB(), {}, {symbol: {"quantity": held}},
+        {"equity": 1000.0, "buying_power": 1000.0},
+        fetch_quote_snapshots=lambda _ib, symbols: {
+            item: SimpleNamespace(last_price=100.0) for item in symbols
+        },
+        submit_order_intent=lambda _ib, intent: submitted.append(intent) or SimpleNamespace(
+            broker_order_id="synthetic-order", status="Submitted",
+        ),
+        order_intent_cls=OrderIntent,
+        acquire_execution_claim=lambda: claims.append(True) or True,
+        translator=translate,
+        strategy_profile="synthetic-switchable-profile",
+        signal_metadata=_signal_metadata(
+            {symbol: target_value / 1000}, risk_symbols=(symbol,), trade_date="2026-09-05",
+        ),
+        dry_run_only=False,
+        cash_reserve_ratio=0.0,
+        rebalance_threshold_ratio=0.0,
+        limit_buy_premium=1.0,
+        quantity_step=1.0,
+        sell_settle_delay_sec=0,
+        execution_lock_dir=tmp_path,
+        return_summary=True,
+    )
+
+    assert [(intent.side, intent.quantity) for intent in submitted] == (
+        [("sell", expected_quantity)] if expected_quantity else []
+    )
+    assert len(claims) == len(submitted)
+    assert summary["small_account_existing_whole_share_retained_symbols"] == []
+    assert summary["small_account_whole_share_bootstrap_symbols"] == []
+    assert summary["orders_filled"] == []
+    if expected_quantity:
+        assert summary["execution_status"] == "pending_reconciliation"
+
+
 def test_execute_rebalance_submits_limit_buy_for_underweight_position(monkeypatch, tmp_path):
     class FakeIB:
         def openTrades(self):
@@ -634,8 +768,9 @@ def test_execute_rebalance_caps_buy_budget_by_reserved_cash_after_sell(tmp_path,
     assert buy_notional <= max_investable + 1.0
 
 
+@pytest.mark.parametrize("target_weight,buy_expected", [(0.90, False), (0.95, True)])
 def test_execute_rebalance_live_cash_only_reuses_projected_sell_proceeds_when_cash_snapshot_is_stale(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, target_weight, buy_expected,
 ):
     class FakeIB:
         def openTrades(self):
@@ -683,7 +818,7 @@ def test_execute_rebalance_live_cash_only_reuses_projected_sell_proceeds_when_ca
         strategy_symbols=["SOXL", "SOXX"],
         strategy_profile="soxl_soxx_trend_income",
         signal_metadata=_signal_metadata(
-            {"SOXL": 0.0, "SOXX": 0.90},
+            {"SOXL": 0.0, "SOXX": target_weight},
             risk_symbols=("SOXL", "SOXX"),
             trade_date="2026-07-09",
         ),
@@ -699,14 +834,20 @@ def test_execute_rebalance_live_cash_only_reuses_projected_sell_proceeds_when_ca
 
     assert [(intent.symbol, intent.side, intent.quantity) for intent in submitted] == [
         ("SOXL", "sell", 3),
-        ("SOXX", "buy", 1),
-    ]
+    ] + ([("SOXX", "buy", 1)] if buy_expected else [])
     assert summary["orders_filled"][0]["symbol"] == "SOXL"
-    assert summary["orders_pending"][0]["symbol"] == "SOXX"
+    assert [order["symbol"] for order in summary["orders_pending"]] == (
+        ["SOXX"] if buy_expected else []
+    )
     assert summary["orders_submitted"] == []
-    assert summary["execution_status"] == "pending_reconciliation"
+    assert summary["execution_status"] == ("pending_reconciliation" if buy_expected else "executed")
     assert summary["projected_sell_release_value"] == 577.5
-    assert summary["orders_skipped"] == []
+    assert summary["orders_skipped"] == (
+        [] if buy_expected else [{"symbol": "SOXX", "side": "buy", "reason": "quantity_zero"}]
+    )
+    for intent in submitted:
+        if intent.side == "buy":
+            assert intent.quantity * intent.limit_price <= 1920.36 * 0.97 * target_weight - 2 * 582.25
 
 
 def test_execute_rebalance_live_cash_only_does_not_bridge_unfilled_sell_submissions(tmp_path, monkeypatch):
@@ -1133,7 +1274,7 @@ def test_execute_rebalance_zero_target_sell_uses_position_quantity(monkeypatch, 
     assert submitted[0].quantity == 2
 
 
-def test_execute_rebalance_keeps_existing_whole_share_when_positive_target_is_unbuyable(monkeypatch, tmp_path):
+def test_execute_rebalance_sells_existing_whole_shares_when_target_projects_to_cash(monkeypatch, tmp_path):
     class FakeIB:
         def openTrades(self):
             return []
@@ -1182,14 +1323,14 @@ def test_execute_rebalance_keeps_existing_whole_share_when_positive_target_is_un
         return_summary=True,
     )
 
-    assert summary["small_account_existing_whole_share_retained_symbols"] == ["TQQQ"]
+    assert summary["small_account_existing_whole_share_retained_symbols"] == []
     sell_orders = [intent for intent in submitted if intent.side == "sell"]
     assert len(sell_orders) == 1
     assert sell_orders[0].symbol == "TQQQ"
-    assert sell_orders[0].quantity == 6
+    assert sell_orders[0].quantity == 7
 
 
-def test_execute_rebalance_retains_existing_soxx_when_delever_target_nearly_one_share(monkeypatch, tmp_path):
+def test_execute_rebalance_projects_unbuyable_soxx_target_to_cash(monkeypatch, tmp_path):
     class FakeIB:
         def openTrades(self):
             return []
@@ -1236,13 +1377,13 @@ def test_execute_rebalance_retains_existing_soxx_when_delever_target_nearly_one_
         return_summary=True,
     )
 
-    assert summary["small_account_existing_whole_share_retained_symbols"] == ["SOXX"]
-    assert "SOXX" not in summary["small_account_whole_share_substituted_symbols"]
-    assert not [
+    assert summary["small_account_existing_whole_share_retained_symbols"] == []
+    assert "SOXX" in summary["small_account_whole_share_substituted_symbols"]
+    assert [
         order
         for order in summary["orders_submitted"]
         if order["side"] == "sell" and order["symbol"] == "SOXX"
-    ]
+    ] == [{"symbol": "SOXX", "side": "sell", "quantity": 1, "status": "dry_run"}]
     assert {
         "symbol": "SOXL",
         "side": "buy",
@@ -1314,7 +1455,7 @@ def test_execute_rebalance_caps_buy_to_cash_when_overweight_sell_rounds_to_zero(
     assert not [order for order in summary["orders_submitted"] if order["side"] == "sell"]
 
 
-def test_execute_rebalance_bootstraps_close_to_one_share_core_target(monkeypatch, tmp_path):
+def test_execute_rebalance_does_not_bootstrap_unbuyable_core_target(monkeypatch, tmp_path):
     class FakeIB:
         def openTrades(self):
             return []
@@ -1362,18 +1503,12 @@ def test_execute_rebalance_bootstraps_close_to_one_share_core_target(monkeypatch
         return_summary=True,
     )
 
-    assert summary["small_account_whole_share_bootstrap_symbols"] == ["SOXL"]
-    assert summary["small_account_whole_share_substituted_symbols"] == ["SOXX"]
-    assert summary["small_account_allocation_drift_notes"][0]["symbol"] == "SOXX"
+    assert summary["small_account_whole_share_bootstrap_symbols"] == []
+    assert summary["small_account_whole_share_substituted_symbols"] == ["SOXL", "SOXX"]
+    assert {note["symbol"] for note in summary["small_account_allocation_drift_notes"]} == {"SOXL", "SOXX"}
     assert any("整数股偏离" in log and "SOXX.US 预计 0.0%" in log for log in trade_logs)
     assert any("SOXL.US" in log and "1 股" in log for log in trade_logs)
-    assert {
-        "symbol": "SOXL",
-        "side": "buy",
-        "quantity": 1,
-        "limit_price": 233.18,
-        "status": "dry_run",
-    } in summary["orders_submitted"]
+    assert summary["orders_submitted"] == []
     assert not [
         order
         for order in summary["orders_submitted"]
@@ -1381,7 +1516,7 @@ def test_execute_rebalance_bootstraps_close_to_one_share_core_target(monkeypatch
     ]
 
 
-def test_execute_rebalance_buy_only_top_up_existing_whole_share_is_not_filtered_as_no_op(monkeypatch, tmp_path):
+def test_execute_rebalance_skips_existing_top_up_smaller_than_one_share(monkeypatch, tmp_path):
     class FakeIB:
         def openTrades(self):
             return []
@@ -1426,15 +1561,10 @@ def test_execute_rebalance_buy_only_top_up_existing_whole_share_is_not_filtered_
         return_summary=True,
     )
 
-    assert summary["execution_status"] == "executed"
-    assert summary["small_account_whole_share_bootstrap_symbols"] == ["SOXX"]
-    assert {
-        "symbol": "SOXX",
-        "side": "buy",
-        "quantity": 1,
-        "limit_price": 608.02,
-        "status": "dry_run",
-    } in summary["orders_submitted"]
+    assert summary["execution_status"] == "no_op"
+    assert summary["no_op_reason"] == "quantity_zero:SOXX"
+    assert summary["small_account_whole_share_bootstrap_symbols"] == []
+    assert summary["orders_submitted"] == []
 
 
 def test_execute_rebalance_skips_when_pending_orders_exist():

@@ -1172,16 +1172,6 @@ def _limit_buy_price(symbol, price, default_premium, premium_by_symbol=None) -> 
 
 DEFAULT_SAFE_HAVEN_CASH_SUBSTITUTE_THRESHOLD_USD = 1000.0
 SMALL_ACCOUNT_SAFE_HAVEN_CASH_SUBSTITUTE_LIMIT_USD = 2000.0
-SMALL_ACCOUNT_EXISTING_WHOLE_SHARE_RETENTION_SYMBOLS = frozenset({"TQQQ", "SOXL"})
-_SMALL_ACCOUNT_RETENTION_MIN_TARGET_SHARE_RATIO_DEFAULT = 0.85
-SMALL_ACCOUNT_EXISTING_WHOLE_SHARE_RETENTION_MIN_TARGET_SHARE_RATIO_BY_SYMBOL = {
-    "SOXX": 0.90,
-}
-SMALL_ACCOUNT_WHOLE_SHARE_BOOTSTRAP_MIN_TARGET_SHARE_RATIO_BY_SYMBOL = {
-    "TQQQ": 0.90,
-    "SOXL": 0.90,
-    "SOXX": 0.90,
-}
 
 
 def _positive_target_total(targets: dict[str, Any]) -> float:
@@ -1221,69 +1211,6 @@ def _apply_safe_haven_cash_substitution_to_weights(
     return adjusted, tuple(dict.fromkeys(substituted))
 
 
-def _should_retain_existing_whole_share(symbol, *, target_value, price, quantity=0.0) -> bool:
-    """Decide whether an existing whole-share position should be retained.
-
-    Universal rule: if the account already holds this symbol (>0 shares) and the
-    strategy wants to keep a meaningful fraction of a share (target >= 85% of 1-share
-    price), retain the position.  This prevents the sell-then-fail-to-rebuy cycle for
-    small accounts where target < 1 share but still close to it.
-
-    Genuine reductions (target << 1 share) are NOT blocked — the sell proceeds.
-    The hardcoded lists act as overrides for symbols that need a different threshold.
-    """
-    normalized_symbol = str(symbol or "").strip().upper()
-    held = float(quantity or 0.0)
-    target = float(target_value or 0.0)
-    quote_price = max(0.0, float(price or 0.0))
-
-    # Universal: held + positive target + target close to 1-share price → retain
-    if held > 0.0 and target > 0.0 and quote_price > 0.0:
-        if target >= quote_price * _SMALL_ACCOUNT_RETENTION_MIN_TARGET_SHARE_RATIO_DEFAULT:
-            return True
-
-    # Legacy whitelist — unconditional retention (safety net)
-    if normalized_symbol in SMALL_ACCOUNT_EXISTING_WHOLE_SHARE_RETENTION_SYMBOLS:
-        return True
-
-    # Legacy per-symbol ratio-based retention (override / tighter threshold)
-    min_target_share_ratio = (
-        SMALL_ACCOUNT_EXISTING_WHOLE_SHARE_RETENTION_MIN_TARGET_SHARE_RATIO_BY_SYMBOL.get(normalized_symbol)
-    )
-    if min_target_share_ratio is None:
-        return False
-    if quote_price <= 0.0:
-        return False
-    return target >= quote_price * float(min_target_share_ratio)
-
-
-def _should_bootstrap_whole_share_buy(symbol, *, target_value, limit_price) -> bool:
-    normalized_symbol = str(symbol or "").strip().upper()
-    min_target_share_ratio = (
-        SMALL_ACCOUNT_WHOLE_SHARE_BOOTSTRAP_MIN_TARGET_SHARE_RATIO_BY_SYMBOL.get(normalized_symbol)
-    )
-    if min_target_share_ratio is None:
-        return False
-    effective_limit_price = max(0.0, float(limit_price or 0.0))
-    if effective_limit_price <= 0.0:
-        return False
-    return max(0.0, float(target_value or 0.0)) >= effective_limit_price * float(min_target_share_ratio)
-
-
-def _should_top_up_existing_whole_share_buy(symbol, *, target_gap_value, limit_price, quantity=0.0) -> bool:
-    normalized_symbol = str(symbol or "").strip().upper()
-    if normalized_symbol not in SMALL_ACCOUNT_WHOLE_SHARE_BOOTSTRAP_MIN_TARGET_SHARE_RATIO_BY_SYMBOL:
-        return False
-    if max(0.0, float(quantity or 0.0)) <= 0.0:
-        return False
-    effective_limit_price = max(0.0, float(limit_price or 0.0))
-    if effective_limit_price <= 0.0:
-        return False
-    return max(0.0, float(target_gap_value or 0.0)) >= (
-        effective_limit_price * float(_SMALL_ACCOUNT_RETENTION_MIN_TARGET_SHARE_RATIO_DEFAULT)
-    )
-
-
 def _planned_buy_order_quantity(
     symbol,
     *,
@@ -1293,34 +1220,14 @@ def _planned_buy_order_quantity(
     investable_buying_power,
     held_quantity=0.0,
 ) -> tuple[float, bool]:
+    """Round the approved buy budget down; retain the legacy result shape."""
     effective_limit_price = max(0.0, float(limit_price or 0.0))
     qty = (
         _floor_order_quantity(float(buy_value or 0.0) / effective_limit_price, quantity_step=quantity_step)
         if effective_limit_price > 0.0
         else 0.0
     )
-    forced_whole_share = False
-    if (
-        qty <= 0
-        and effective_limit_price > 0.0
-        and float(investable_buying_power or 0.0) >= effective_limit_price
-        and (
-            _should_top_up_existing_whole_share_buy(
-                symbol,
-                target_gap_value=buy_value,
-                limit_price=effective_limit_price,
-                quantity=held_quantity,
-            )
-            or _should_bootstrap_whole_share_buy(
-                symbol,
-                target_value=buy_value,
-                limit_price=effective_limit_price,
-            )
-        )
-    ):
-        qty = _floor_order_quantity(1.0, quantity_step=quantity_step)
-        forced_whole_share = qty > 0
-    return qty, forced_whole_share
+    return qty, False
 
 
 def _projected_sell_release_value_for_report(report, *, fallback_price=0.0, fallback_quantity=0.0) -> float:
@@ -1338,46 +1245,6 @@ def _projected_sell_release_value_for_report(report, *, fallback_price=0.0, fall
     if fill_price <= 0.0:
         return 0.0
     return filled_quantity * fill_price
-
-
-def _format_symbol_with_suffix(symbol, *, suffix=".US") -> str:
-    normalized = str(symbol or "").strip().upper()
-    if not normalized:
-        return normalized
-    if "." in normalized:
-        return normalized
-    normalized_suffix = str(suffix or "").strip().upper()
-    return f"{normalized}{normalized_suffix}" if normalized_suffix else normalized
-
-
-def _format_small_account_whole_share_bootstrap_notes(
-    symbols,
-    *,
-    translator,
-    symbol_suffix=".US",
-) -> tuple[str, ...]:
-    normalized_symbols = tuple(
-        dict.fromkeys(
-            _format_symbol_with_suffix(symbol, suffix=symbol_suffix)
-            for symbol in tuple(symbols or ())
-            if str(symbol or "").strip()
-        )
-    )
-    if not normalized_symbols:
-        return ()
-    try:
-        message = translator(
-            "buy_lifted_small_account_whole_share",
-            symbols=", ".join(normalized_symbols),
-        )
-    except Exception:
-        message = ""
-    if not message or message == "buy_lifted_small_account_whole_share":
-        message = (
-            f"ℹ️ [买入说明] {', '.join(normalized_symbols)} 目标金额接近 1 股；"
-            "小账户整数股兼容，本轮允许按 1 股下单"
-        )
-    return (message,)
 
 
 def _finalize_result(trade_logs, execution_summary, *, return_summary: bool):
@@ -1625,40 +1492,6 @@ def execute_rebalance(
             for symbol in target_mv
             if str(symbol or "").strip().upper() not in safe_haven_symbols
         )
-    small_account_retained_symbols = []
-    small_account_bootstrap_symbols = []
-    for symbol in small_account_candidate_symbols:
-        target_value = max(0.0, float(target_mv.get(symbol, 0.0) or 0.0))
-        price = max(0.0, float(prices.get(symbol, 0.0) or 0.0))
-        limit_price = (
-            _limit_buy_price(symbol, price, limit_buy_premium, limit_buy_premium_by_symbol)
-            if price > 0.0
-            else 0.0
-        )
-        # Skip bootstrap if the account cannot afford even 1 share at limit price.
-        _can_afford_one_share = limit_price > 0.0 and investable >= limit_price
-        held_quantity = max(0.0, float(positions.get(symbol, {}).get("quantity", 0.0) or 0.0))
-        if (
-            _should_retain_existing_whole_share(symbol, target_value=target_value, price=price, quantity=held_quantity)
-            and price > 0.0
-            and 0.0 < target_value < price
-            and held_quantity >= 1.0
-        ):
-            target_mv[symbol] = price
-            if investable > 0.0:
-                target_weights[symbol] = price / investable
-            small_account_retained_symbols.append(symbol)
-            continue
-        if (
-            held_quantity <= 0.0
-            and 0.0 < target_value < limit_price
-            and _can_afford_one_share
-            and _should_bootstrap_whole_share_buy(symbol, target_value=target_value, limit_price=limit_price)
-        ):
-            target_mv[symbol] = limit_price
-            if investable > 0.0:
-                target_weights[symbol] = limit_price / investable
-            small_account_bootstrap_symbols.append(symbol)
     small_account_compatibility = apply_small_account_cash_compatibility(
         target_mv,
         prices,
@@ -1689,12 +1522,8 @@ def execute_rebalance(
     execution_summary["small_account_safe_haven_cash_substituted_symbols"] = (
         small_account_safe_haven_cash_substituted_symbols
     )
-    execution_summary["small_account_existing_whole_share_retained_symbols"] = list(
-        dict.fromkeys(small_account_retained_symbols)
-    )
-    execution_summary["small_account_whole_share_bootstrap_symbols"] = list(
-        dict.fromkeys(small_account_bootstrap_symbols)
-    )
+    execution_summary["small_account_existing_whole_share_retained_symbols"] = []
+    execution_summary["small_account_whole_share_bootstrap_symbols"] = []
     execution_summary["small_account_whole_share_cash_notes"] = list(
         small_account_compatibility.cash_substitution_notes
     )
@@ -1702,12 +1531,6 @@ def execute_rebalance(
     trade_logs.extend(
         format_small_account_cash_substitution_notes(
             small_account_compatibility.cash_substitution_notes,
-            translator=translator,
-        )
-    )
-    trade_logs.extend(
-        _format_small_account_whole_share_bootstrap_notes(
-            execution_summary["small_account_whole_share_bootstrap_symbols"],
             translator=translator,
         )
     )
@@ -2240,7 +2063,7 @@ def execute_rebalance(
 
             limit_price = _limit_buy_price(symbol, price, limit_buy_premium, limit_buy_premium_by_symbol)
             held_quantity = max(0.0, float(positions.get(symbol, {}).get("quantity", 0.0) or 0.0))
-            qty, forced_whole_share = _planned_buy_order_quantity(
+            qty, _forced_whole_share = _planned_buy_order_quantity(
                 symbol,
                 buy_value=buy_value,
                 limit_price=limit_price,
@@ -2248,17 +2071,6 @@ def execute_rebalance(
                 investable_buying_power=investable_buying_power,
                 held_quantity=held_quantity,
             )
-            if (
-                forced_whole_share
-                and symbol not in execution_summary["small_account_whole_share_bootstrap_symbols"]
-            ):
-                execution_summary["small_account_whole_share_bootstrap_symbols"].append(symbol)
-                trade_logs.extend(
-                    _format_small_account_whole_share_bootstrap_notes(
-                        (symbol,),
-                        translator=translator,
-                    )
-                )
             if qty <= 0:
                 execution_summary["orders_skipped"].append({"symbol": symbol, "side": "buy", "reason": "quantity_zero"})
                 continue
