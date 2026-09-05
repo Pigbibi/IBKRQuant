@@ -11,6 +11,10 @@ on:
         options:
           - configured
           - hk-verify
+      configured_service:
+        description: "Optional exact inventory service_name for configured target; blank keeps all configured targets."
+        required: false
+        type: string
       cloud_run_region:
         description: "Cloud Run region for hk-verify. Leave blank to use repository/environment variables."
         required: false
@@ -70,6 +74,7 @@ jobs:
       QSL_ENABLE_CLOUD_RUN_AUTOMATION: ${{ vars.QSL_ENABLE_CLOUD_RUN_AUTOMATION }}
       CLOUD_RUN_CLEANUP_ENABLED: ${{ vars.CLOUD_RUN_CLEANUP_ENABLED }}
       WORKFLOW_TARGET: ${{ inputs.target || 'configured' }}
+      INPUT_CONFIGURED_SERVICE: ${{ inputs.configured_service }}
       INPUT_CLOUD_RUN_REGION: ${{ inputs.cloud_run_region }}
       INPUT_CLOUD_RUN_SERVICE: ${{ inputs.cloud_run_service }}
       INPUT_ACCOUNT_GROUP: ${{ inputs.account_group }}
@@ -342,11 +347,31 @@ jobs:
         run: |
           set -euo pipefail
           sync_plan_json="$(uv run --no-sync python scripts/build_cloud_run_env_sync_plan.py --json)"
-          {
-            echo "sync_plan_json<<__SYNC_PLAN_JSON__"
-            printf '%s\n' "${sync_plan_json}"
-            echo "__SYNC_PLAN_JSON__"
-          } >> "$GITHUB_OUTPUT"
+          export SYNC_PLAN_JSON="${sync_plan_json}"
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          plan = json.loads(os.environ["SYNC_PLAN_JSON"])
+          selected = os.environ.get("INPUT_CONFIGURED_SERVICE", "")
+          if os.environ.get("WORKFLOW_TARGET", "configured") == "configured" and selected:
+              if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", selected) or plan.get("mode") != "per_service":
+                  raise SystemExit("configured_service requires an exact private inventory service_name")
+              matches = [target for target in plan["targets"] if target.get("service_name") == selected]
+              if len(matches) != 1:
+                  raise SystemExit("configured_service must match exactly one admitted inventory target")
+              plan["targets"] = matches
+              # Reconciliation also reads inventory and legacy env; scope every source.
+              inventory = json.dumps({"targets": [{"service_name": selected}]})
+              with Path(os.environ["GITHUB_ENV"]).open("a") as handle:
+                  handle.write(f"CLOUD_RUN_SERVICE_TARGETS_JSON={inventory}\n")
+                  handle.write(f"CLOUD_RUN_SERVICE={selected}\nCLOUD_RUN_SERVICES={selected}\n")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as handle:
+              handle.write("sync_plan_json<<__SYNC_PLAN_JSON__\n")
+              handle.write(json.dumps(plan) + "\n__SYNC_PLAN_JSON__\n")
+          PY
 
       - name: Validate env sync inputs
         if: steps.config.outputs.env_sync_enabled == 'true'
@@ -1289,7 +1314,9 @@ jobs:
             --scheduler-location="${scheduler_location}"
             --delete-legacy-schedulers
           )
-          python3 scripts/reconcile_cloud_runtime.py "${reconcile_args[@]}"
+          if [ "${WORKFLOW_TARGET:-configured}" != "configured" ] || [ -z "${INPUT_CONFIGURED_SERVICE:-}" ]; then
+            python3 scripts/reconcile_cloud_runtime.py "${reconcile_args[@]}"
+          fi
 
           for update in "${scheduler_updates[@]}"; do
             IFS=$'\t' read -r cloud_run_service _ <<< "${update}"
@@ -1309,7 +1336,7 @@ jobs:
           done
 
       - name: Prune old Cloud Run revisions
-        if: steps.config.outputs.deploy_enabled == 'true' && env.CLOUD_RUN_CLEANUP_ENABLED == 'true'
+        if: steps.config.outputs.deploy_enabled == 'true' && env.CLOUD_RUN_CLEANUP_ENABLED == 'true' && (env.WORKFLOW_TARGET != 'configured' || env.INPUT_CONFIGURED_SERVICE == '')
         env:
           SYNC_PLAN_JSON: ${{ steps.strategy_requirements.outputs.sync_plan_json }}
         run: |
@@ -1398,7 +1425,7 @@ jobs:
           done
 
       - name: Clean up old Cloud Run images
-        if: steps.config.outputs.deploy_enabled == 'true' && env.CLOUD_RUN_CLEANUP_ENABLED == 'true'
+        if: steps.config.outputs.deploy_enabled == 'true' && env.CLOUD_RUN_CLEANUP_ENABLED == 'true' && (env.WORKFLOW_TARGET != 'configured' || env.INPUT_CONFIGURED_SERVICE == '')
         run: |
           set -euo pipefail
 
