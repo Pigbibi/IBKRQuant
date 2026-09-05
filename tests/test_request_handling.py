@@ -1565,3 +1565,33 @@ def test_handle_reconciliation_rejects_missing_scheduler_identity_before_broker_
 
     assert (body, response_code) == ("Error", 400)
     assert broker_connection_attempts == []
+
+
+@pytest.mark.parametrize(
+    ("scheduler_identity", "reason"),
+    [
+        (None, "missing_scheduler_identity"),
+        ("", "invalid_scheduler_identity"),
+        ("private-invalid-header-value", "invalid_scheduler_identity"),
+    ],
+)
+def test_reconciliation_rejection_reports_only_safe_reason(
+    strategy_module, monkeypatch, capsys, scheduler_identity, reason,
+):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("rejected request must not read broker or persist report")
+
+    for name in ("connect_ib", "build_execution_report", "persist_reconciliation_report"):
+        monkeypatch.setattr(strategy_module, name, forbidden)
+    headers = {} if scheduler_identity is None else {"X-CloudScheduler-JobName": scheduler_identity}
+    capsys.readouterr()
+    response = strategy_module.app.test_client().post("/reconcile", headers=headers)
+
+    assert response.status_code == 400
+    assert response.get_data(as_text=True) == "Error"
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {
+        "event": "broker_reconciliation_rejected",
+        "reason": reason,
+    }
+    assert output.err == ""
