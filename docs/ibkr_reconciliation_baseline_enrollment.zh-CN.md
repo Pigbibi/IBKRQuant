@@ -1,25 +1,25 @@
 # IBKR 旧实盘基线：审核材料生成
 
-`scripts/build_reconciliation_baseline_candidate.py` 只处理两份或更多私有的、已脱敏
-`/reconcile` 回应或运行报告。它调用 QuantPlatformKit 的通用规则，验证这些收据是
-新鲜、时间分离、账户身份一致且全部状态摘要相同，然后输出
-`broker_reconciliation_baseline_candidate.v1`。
+`scripts/build_reconciliation_baseline_candidate.py` 处理一份或更多私有、已脱敏的
+`/reconcile` 回应。调用方同时显式提供已保存的 source records 和独立核验的
+`SourceReceiptExpectation`。现有 record/expectation 字段逐项一致、evidence 成员精确对应
+后，才调用 QPK 生成既有 source-bound `broker_reconciliation_baseline_candidate.v2`。
+收据必须新鲜、账户/runtime 匹配且各账务面已对账；不再要求第二份或固定最小间隔。
 
 该工具不连接 IB Gateway、不访问原始账户资料、不写 Cloud Run 环境变量、不改
 `RUNTIME_TARGET_JSON`，更不会下单。它的非零退出码表示候选尚不能进入审计；这不是
 故障恢复授权。
 
-私有控制面将候选的 `candidate_sha256` 交给 AIAuditBridge 的
-`reconciliation_baseline` 强制双审。双审结果与候选摘要一致后，统一管理站点仍必须
-让操作者人工确认“恢复原有实盘基线”。现有自动化权限策略将这类 broker/order
-execution 变更视为高风险，禁止自动恢复。
+模型审查仅为 advisory，省略时真实显示 unavailable/0；已有 rejected/unavailable 不
+改写成 approved，不要求多模型票数或伪造 `dual_review_binding_reverified=True`。
+人工确认、确认后的新观察、五摘要比较和 CAS/no-order 约束继续保留；本补丁不批准
+真实账户接管、live、下单或扩大资金。
 
 ## 发布给统一管理站点的最小来源快照
 
-`scripts/publish_reconciliation_recovery_source.py` 只接受上一步的私有候选和
-AIAuditBridge 的完整 `reconciliation_baseline` 输出。它会同时核验：强制多审已
-执行、至少一名主审和一名独立复审存在、结论通过、候选 SHA-256 完全绑定，以及
-审计结果仍明确要求人工恢复确认和 `escalate` 权限边界。
+`scripts/publish_reconciliation_recovery_source.py` 接受候选、独立来源文件及可选完整审查。
+它重新核验 record/expectation、来源根及 candidate evidence 成员；已有审查仍须绑定同一
+候选，并保持人工确认/escalate 边界。票数和模型结论不决定是否可以进入人工确认。
 
 默认行为只是打印 `qsl_reconciliation_recovery_source_snapshot.v1`，其中只有不透明
 恢复 ID、平台/策略、候选摘要、采样时间窗、审计绑定与稳定阻断码；不含账号、仓位、
@@ -29,19 +29,21 @@ AIAuditBridge 的完整 `reconciliation_baseline` 输出。它会同时核验：
 `/api/internal/sync-reconciliation-recovery-source` 地址，且环境中存在专用的
 `RECONCILIATION_RECOVERY_SYNC_TOKEN` 时，脚本才会把上述最小快照发给统一管理站点。
 该写入仅供人工确认队列使用，不能恢复 `ACTIVE_LKG`。后续私有控制器仍须重新读取
-券商、复核双审绑定，并以原子比较并设置方式转换状态；任一失败都保持
+券商、重验来源及候选绑定，并以原子比较并设置方式转换状态；任一失败都保持
 `RECONCILE_ONLY`。
 
 来源发布器还可在显式给出
 `gs://.../reconciliation-recovery/ibkr/source/...` 时，把完整候选与双审回执写入
-私有证据包。该包不发送给 QRS；写入固定使用 GCS `if_generation_match=0`，所以已存在
+私有证据包（缺审查保存 null，不制造审核结果）。来源文件由调用方独立保留，不从
+待验证包中自造受信 expectations。该包不发送给 QRS；写入固定使用 GCS `if_generation_match=0`，所以已存在
 对象会失败而不会被覆盖、读取或删除。验证器只能在专用私有存储中读取它。
 
 ## 私有验证器（暂不写状态）
 
 `scripts/verify_reconciliation_recovery.py` 是恢复链路的第二层。它使用一枚不同于
 来源发布令牌的 `RECONCILIATION_RECOVERY_CONTROLLER_TOKEN`，从 QRS 只读取得已确认
-条目；然后重新解析本地私有候选与完整双审回执，读取一份**确认之后**新生成的
+条目；然后重新验证本地私有候选、独立指定的 source records/expectations 与可选审查，
+要求控制台样本数等于候选真实成员数，读取一份**确认之后**新生成的
 `/reconcile` 回执，并核对已部署 `RUNTIME_TARGET_JSON` 仍为同一
 `RECONCILE_ONLY` 基线。
 
@@ -88,7 +90,7 @@ URI、部署 Cloud Run、连接券商或提交订单。实际启用仍需要单�
 `transition_plan` 的结果；测试同时断言 `state_write_attempted=false`。这让后续接入
 最小权限 CAS 时能持续证明“异常只能保持冻结，不能意外恢复实盘”。
 
-## 收集两份候选收据
+## 收集候选收据
 
 `Collect IBKR Reconciliation Evidence` 是显式手动工作流。由于这些 Cloud Run 服务只接受
 内部入口，工作流会以部署身份创建一个名称绑定到本次运行、几分钟后只执行一次的 Cloud
@@ -101,8 +103,8 @@ Scheduler 任务，再由既有的最小权限 Scheduler 身份调用冻结服�
 `broker_reconciliation` 摘要；`build_reconciliation_baseline_candidate.py` 可直接消费它。
 这样基线审核不必下载包含其他运行诊断的完整私有报告。
 
-同一目标至少应在相隔一分钟的两次手动运行中得到候选，才能交给
-`build_reconciliation_baseline_candidate.py`。工作流的成功只说明读取和收据格式正常；
+同一目标的一份完整、可信来源收据即可交给
+`build_reconciliation_baseline_candidate.py`，不因凑样本重复触发采集。工作流的成功只说明读取和收据格式正常；
 候选仍可能因为未配置预期摘要或账本差异而正确保持阻断。
 
 其中现金摘要只选择结算/账面现金标签（例如 `CashBalance`），不会把随市价变化的
@@ -111,18 +113,27 @@ Scheduler 任务，再由既有的最小权限 Scheduler 身份调用冻结服�
 
 ## v2 来源根（仅私有候选构造）
 
-`application.broker_reconciliation_candidate` 将**恰好两份**已保存、已脱敏的 source
-record 绑定到既有 v1 候选，显式生成
+`application.broker_reconciliation_candidate` 校验**至少一份**已保存、已脱敏的 source
+record。新 builder 直接生成
 `broker_reconciliation_baseline_candidate.v2`。每条 record 固定且只允许
 `schema_version`、`repository`、`workflow_path`、`workflow_run_id`、
 `workflow_run_attempt`、`workflow_head_sha`、`artifact_id`、`artifact_name`、
 `artifact_sha256`、`evidence_sha256`、`service_name`、`service_revision`、
-`service_revision_commit_sha`、`service_deploy_run_id`。构造器要求恰好两条，唯一
+`service_revision_commit_sha`、`service_deploy_run_id`。构造器要求来源数量一致、唯一
 artifact/run；审计指定的 expectation 还将 candidate profile、`main` 成功 workflow、
-artifact 命名，以及相同 repository/workflow/head 与 service/revision/commit 绑定到这两条
+artifact 命名，以及相同 repository/workflow/head 与 service/revision/commit 绑定到各条
 record。随后将完整 canonical records 的单一根写入 `source_receipts_sha256`；任一缺失、
 额外字段或不一致均失败关闭。
 
 该模块是无 I/O 的 private consumer：不查询 GitHub/Cloud Run，不启动 workflow，不接触
 broker/account/order，也不读取或写入 expected digest、`ACTIVE_LKG` 或 publisher。在线读取和
 持久化来源记录属于后续受控 recorder，不在此范围内。
+
+三个 CLI 均要求 `--source-records <私有JSON列表>` 与
+`--source-expectations <独立核验的私有JSON列表>`；发布器和验证器的 `--dual-review` 可省略。
+这些参数不触发来源下载或批准；验证器的既有确认读取、发布器的显式发布/存储副作用不变。
+
+来源根只绑定内容，不证明账户身份、查询完整性、账务解释或权限。expectations 必须由
+受信调用方独立核验，不能从待验证 records/candidate 自我生成。合成测试只证明这些
+consumer 实际接线，不证明任何真实账户安全。历史无来源 v1 只读保留，publisher/verifier
+拒绝新申请；旧显式 v1→v2 helper 仍要求完整独立来源校验及成员关联，不用于新单份路径。

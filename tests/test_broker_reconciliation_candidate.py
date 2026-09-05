@@ -77,7 +77,7 @@ def _expectations() -> tuple[SourceReceiptExpectation, ...]:
             artifact_id="100",
             artifact_name="ibkr-reconciliation-global_etf_rotation-10",
             artifact_sha256=_DIGEST,
-            evidence_sha256=_OTHER_DIGEST,
+            evidence_sha256=_candidate().source_evidence_sha256[0],
             service_name="interactive-brokers-platform",
             service_revision="ibkr-service-00002",
             service_revision_commit_sha=_SERVICE_COMMIT_SHA,
@@ -95,7 +95,7 @@ def _expectations() -> tuple[SourceReceiptExpectation, ...]:
             artifact_id="200",
             artifact_name="ibkr-reconciliation-global_etf_rotation-20",
             artifact_sha256=_OTHER_DIGEST,
-            evidence_sha256="e" * 64,
+            evidence_sha256=_candidate().source_evidence_sha256[1],
             service_name="interactive-brokers-platform",
             service_revision="ibkr-service-00002",
             service_revision_commit_sha=_SERVICE_COMMIT_SHA,
@@ -116,7 +116,7 @@ def _records() -> tuple[dict[str, str], ...]:
             "artifact_id": "200",
             "artifact_name": "ibkr-reconciliation-global_etf_rotation-20",
             "artifact_sha256": _OTHER_DIGEST,
-            "evidence_sha256": "e" * 64,
+            "evidence_sha256": _candidate().source_evidence_sha256[1],
             "service_name": "interactive-brokers-platform",
             "service_revision": "ibkr-service-00002",
             "service_revision_commit_sha": _SERVICE_COMMIT_SHA,
@@ -132,7 +132,7 @@ def _records() -> tuple[dict[str, str], ...]:
             "artifact_id": "100",
             "artifact_name": "ibkr-reconciliation-global_etf_rotation-10",
             "artifact_sha256": _DIGEST,
-            "evidence_sha256": _OTHER_DIGEST,
+            "evidence_sha256": _candidate().source_evidence_sha256[0],
             "service_name": "interactive-brokers-platform",
             "service_revision": "ibkr-service-00002",
             "service_revision_commit_sha": _SERVICE_COMMIT_SHA,
@@ -171,7 +171,7 @@ def test_builds_v2_candidate_from_exactly_two_designated_redacted_source_records
 @pytest.mark.parametrize(
     ("records", "message"),
     (
-        (_records()[:1], "exactly two source receipt records"),
+        (_records()[:1], "artifact IDs must match"),
         ((_records()[0], _records()[0]), "artifact/run pairs must be unique"),
         (({**_records()[0], "unexpected": "field"}, _records()[1]), "invalid fields"),
     ),
@@ -296,3 +296,22 @@ def test_v2_builder_rejects_existing_v2_candidate_and_tampered_provenance_root()
     tampered["source_receipts_sha256"] = _OTHER_DIGEST
     with pytest.raises(ValueError, match="candidate_sha256 mismatch"):
         type(upgraded).from_dict(tampered)
+
+
+def test_one_designated_source_record_does_not_require_repeated_collection():
+    expectation = _expectations()[0]
+    record = next(item for item in _records() if item["artifact_id"] == expectation.artifact_id)
+    root = calculate_source_receipts_sha256(
+        [record], strategy_profile=expectation.strategy_profile, expectations=[expectation],
+    )
+    assert len(root) == 64
+
+
+def test_source_records_must_bind_actual_candidate_evidence_members():
+    # Well-formed provenance must still bind the actual candidate members.
+    records = tuple({**item, "evidence_sha256": _OTHER_DIGEST} for item in _records())
+    expectations = tuple(replace(item, evidence_sha256=_OTHER_DIGEST) for item in _expectations())
+    with pytest.raises(ValueError, match="evidence"):
+        build_reconciliation_candidate_v2(
+            _candidate(), source_receipt_records=records, expectations=expectations,
+        )

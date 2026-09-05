@@ -17,6 +17,7 @@ from quant_platform_kit.common.broker_reconciliation import (
 
 from tests.test_reconciliation_recovery_verify_only import (
     _candidate_payload,
+    _candidate_source_inputs,
     _console_response,
     _dual_review,
     _evidence,
@@ -48,6 +49,7 @@ def test_fault_injection_tampered_console_policy_is_rejected_before_evidence_eva
     with pytest.raises(ValueError, match="non-execution policy"):
         verify_reconciliation_recovery(
             candidate_payload=candidate,
+            **_candidate_source_inputs(start),
             dual_review_payload=_dual_review(candidate_sha256),
             confirmation_payload=confirmation,
             current_receipt_payload={"evidence": _evidence(observed_at=start + timedelta(minutes=4)).to_dict()},
@@ -66,6 +68,7 @@ def test_fault_injection_current_cash_digest_drift_closes_transition_plan() -> N
 
     result = verify_reconciliation_recovery(
         candidate_payload=candidate,
+        **_candidate_source_inputs(start),
         dual_review_payload=_dual_review(candidate_sha256),
         confirmation_payload=_console_response(candidate_sha256, confirmed_at=start + timedelta(minutes=3)),
         current_receipt_payload={"evidence": current},
@@ -86,6 +89,7 @@ def test_fault_injection_stale_human_confirmation_closes_transition_plan() -> No
 
     result = verify_reconciliation_recovery(
         candidate_payload=candidate,
+        **_candidate_source_inputs(start),
         dual_review_payload=_dual_review(candidate_sha256),
         confirmation_payload=_console_response(candidate_sha256, confirmed_at=start + timedelta(minutes=3)),
         current_receipt_payload={"evidence": _evidence(observed_at=start + timedelta(minutes=40)).to_dict()},
