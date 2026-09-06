@@ -66,32 +66,13 @@ class ReconcileCloudRuntimeTests(unittest.TestCase):
             },
         )
 
-    def test_ensure_latest_traffic_updates_then_verifies_latest_commit(self) -> None:
+    def test_ensure_latest_traffic_updates_to_commit_revision(self) -> None:
         target = rcr.RuntimeTarget(
             service_name="interactive-brokers-quant-live-u1234-service",
             region="us-central1",
         )
-        service_before = {
-            "status": {
-                "latestReadyRevisionName": "interactive-brokers-quant-live-u1234-service-00001-abc",
-                "traffic": [
-                    {"percent": 100, "revisionName": "interactive-brokers-quant-live-u1234-service-00000-old"}
-                ],
-            }
-        }
-        service_after = {
-            "status": {
-                "latestReadyRevisionName": "interactive-brokers-quant-live-u1234-service-00001-abc",
-                "traffic": [
-                    {
-                        "percent": 100,
-                        "latestRevision": True,
-                        "revisionName": "interactive-brokers-quant-live-u1234-service-00001-abc",
-                    }
-                ],
-            }
-        }
-        revision = {"metadata": {"labels": {"commit-sha": "abc123"}}}
+        rev_name = "interactive-brokers-quant-live-u1234-service-00001-abc"
+        stale = "interactive-brokers-quant-live-u1234-service-00000-old"
         calls: list[list[str]] = []
         service_describe_count = 0
 
@@ -101,9 +82,23 @@ class ReconcileCloudRuntimeTests(unittest.TestCase):
             self.assertFalse(dry_run)
             if args[:4] == ["gcloud", "run", "services", "describe"]:
                 service_describe_count += 1
-                return service_before if service_describe_count == 1 else service_after
-            if args[:4] == ["gcloud", "run", "revisions", "describe"]:
-                return revision
+                traffic_rev = stale if service_describe_count == 1 else rev_name
+                return {
+                    "status": {
+                        "latestReadyRevisionName": stale,
+                        "traffic": [{"percent": 100, "revisionName": traffic_rev}],
+                    }
+                }
+            if args[:4] == ["gcloud", "run", "revisions", "list"]:
+                return [
+                    {
+                        "metadata": {
+                            "name": rev_name,
+                            "labels": {"commit-sha": "abc123"},
+                        },
+                        "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                    }
+                ]
             if args[:4] == ["gcloud", "run", "services", "update-traffic"]:
                 return ""
             self.fail(f"unexpected command: {args}")
@@ -118,10 +113,12 @@ class ReconcileCloudRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(service_describe_count, 2)
-        self.assertTrue(any(cmd[:4] == ["gcloud", "run", "services", "update-traffic"] for cmd in calls))
-        self.assertTrue(any(cmd[:4] == ["gcloud", "run", "revisions", "describe"] for cmd in calls))
+        traffic_cmds = [cmd for cmd in calls if cmd[:4] == ["gcloud", "run", "services", "update-traffic"]]
+        self.assertEqual(len(traffic_cmds), 1)
+        self.assertIn(f"--to-revisions={rev_name}=100", traffic_cmds[0])
+        self.assertNotIn("--to-latest", traffic_cmds[0])
 
-    def test_ensure_latest_traffic_requires_latest_ready_revision(self) -> None:
+    def test_ensure_latest_traffic_requires_matching_commit_revision(self) -> None:
         target = rcr.RuntimeTarget(service_name="interactive-brokers-quant-live-u1234-service", region="us-central1")
 
         def fake_run(args, *, json_output=False, dry_run=False):
@@ -129,13 +126,16 @@ class ReconcileCloudRuntimeTests(unittest.TestCase):
                 return {
                     "status": {
                         "latestCreatedRevisionName": "interactive-brokers-quant-live-u1234-service-00001-abc",
+                        "latestReadyRevisionName": "interactive-brokers-quant-live-u1234-service-00000-old",
                         "traffic": [],
                     }
                 }
+            if args[:4] == ["gcloud", "run", "revisions", "list"]:
+                return []
             self.fail(f"unexpected command: {args}")
 
         with mock.patch.object(rcr, "_run", side_effect=fake_run):
-            with self.assertRaises(rcr.ReconcileError):
+            with self.assertRaisesRegex(rcr.ReconcileError, "No Ready revision"):
                 rcr.ensure_latest_traffic(
                     project="interactivebrokersquant",
                     region="us-central1",
@@ -144,36 +144,51 @@ class ReconcileCloudRuntimeTests(unittest.TestCase):
                     dry_run=False,
                 )
 
-    def test_ensure_latest_traffic_rejects_commit_mismatch(self) -> None:
+    def test_ensure_latest_traffic_routes_when_latest_ready_is_stale(self) -> None:
         target = rcr.RuntimeTarget(service_name="interactive-brokers-quant-live-u1234-service", region="us-central1")
+        stale = "interactive-brokers-quant-live-u1234-service-00001"
+        fresh = "interactive-brokers-quant-live-u1234-service-00003"
+        calls: list[list[str]] = []
 
         def fake_run(args, *, json_output=False, dry_run=False):
+            calls.append(list(args))
             if args[:4] == ["gcloud", "run", "services", "describe"]:
+                traffic_rev = stale
+                if any(cmd[:4] == ["gcloud", "run", "services", "update-traffic"] for cmd in calls[:-1]):
+                    traffic_rev = fresh
                 return {
                     "status": {
-                        "latestReadyRevisionName": "interactive-brokers-quant-live-u1234-service-00001-abc",
-                        "traffic": [
-                            {
-                                "percent": 100,
-                                "latestRevision": True,
-                                "revisionName": "interactive-brokers-quant-live-u1234-service-00001-abc",
-                            }
-                        ],
+                        "latestReadyRevisionName": stale,
+                        "traffic": [{"percent": 100, "revisionName": traffic_rev}],
                     }
                 }
-            if args[:4] == ["gcloud", "run", "revisions", "describe"]:
-                return {"metadata": {"labels": {"commit-sha": "wrong-sha"}}}
+            if args[:4] == ["gcloud", "run", "revisions", "list"]:
+                return [
+                    {
+                        "metadata": {"name": fresh, "labels": {"commit-sha": "abc123"}},
+                        "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                    },
+                    {
+                        "metadata": {"name": stale, "labels": {"commit-sha": "old999"}},
+                        "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                    },
+                ]
+            if args[:4] == ["gcloud", "run", "services", "update-traffic"]:
+                return ""
             self.fail(f"unexpected command: {args}")
 
         with mock.patch.object(rcr, "_run", side_effect=fake_run):
-            with self.assertRaises(rcr.ReconcileError):
-                rcr.ensure_latest_traffic(
-                    project="interactivebrokersquant",
-                    region="us-central1",
-                    targets=[target],
-                    expected_commit="abc123",
-                    dry_run=False,
-                )
+            rcr.ensure_latest_traffic(
+                project="interactivebrokersquant",
+                region="us-central1",
+                targets=[target],
+                expected_commit="abc123",
+                dry_run=False,
+            )
+
+        traffic_cmds = [cmd for cmd in calls if cmd[:4] == ["gcloud", "run", "services", "update-traffic"]]
+        self.assertEqual(len(traffic_cmds), 1)
+        self.assertIn(f"--to-revisions={fresh}=100", traffic_cmds[0])
 
     def test_delete_legacy_schedulers_deletes_only_known_jobs(self) -> None:
         target = rcr.RuntimeTarget(service_name="interactive-brokers-quant-live-u1234-service")
