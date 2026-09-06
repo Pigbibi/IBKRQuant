@@ -160,7 +160,7 @@ def _run_optional(args: Sequence[str], *, dry_run: bool = False) -> bool:
     return completed.returncode == 0
 
 
-def _traffic_on_latest(service: Mapping[str, Any], latest_revision: str) -> bool:
+def _traffic_on_revision(service: Mapping[str, Any], revision_name: str) -> bool:
     traffic = service.get("status", {}).get("traffic") or []
     if not isinstance(traffic, list):
         return False
@@ -171,19 +171,42 @@ def _traffic_on_latest(service: Mapping[str, Any], latest_revision: str) -> bool
             percent = int(item.get("percent") or 0)
         except (TypeError, ValueError):
             percent = 0
-        if percent == 100 and (item.get("latestRevision") is True or item.get("revisionName") == latest_revision):
+        if percent == 100 and str(item.get("revisionName") or "").strip() == revision_name:
             return True
     return False
 
 
-def _revision_commit(*, project: str, region: str, revision: str, dry_run: bool) -> str:
-    payload = _run(
+def _revision_is_ready(revision: Mapping[str, Any]) -> bool:
+    conditions = revision.get("status", {}).get("conditions") or []
+    if not isinstance(conditions, list):
+        return False
+    for condition in conditions:
+        if not isinstance(condition, Mapping):
+            continue
+        if str(condition.get("type") or "") == "Ready" and str(condition.get("status") or "") == "True":
+            return True
+    return False
+
+
+def _resolve_revision_for_commit(
+    *,
+    project: str,
+    region: str,
+    service_name: str,
+    expected_commit: str,
+    dry_run: bool,
+) -> str:
+    if dry_run:
+        return f"{service_name}-dry-run"
+    if not expected_commit:
+        raise ReconcileError(f"expected commit is required to route traffic for {service_name}")
+    revisions = _run(
         [
             "gcloud",
             "run",
             "revisions",
-            "describe",
-            revision,
+            "list",
+            f"--service={service_name}",
             f"--project={project}",
             f"--region={region}",
             "--format=json",
@@ -191,8 +214,23 @@ def _revision_commit(*, project: str, region: str, revision: str, dry_run: bool)
         json_output=True,
         dry_run=dry_run,
     )
-    labels = payload.get("metadata", {}).get("labels") or {}
-    return str(labels.get("commit-sha") or "").strip()
+    if not isinstance(revisions, list):
+        raise ReconcileError(f"Unable to list revisions for {service_name}")
+    for revision in revisions:
+        if not isinstance(revision, Mapping):
+            continue
+        if not _revision_is_ready(revision):
+            continue
+        labels = (revision.get("metadata") or {}).get("labels") or {}
+        commit = str(labels.get("commit-sha") or "").strip()
+        if commit != expected_commit:
+            continue
+        name = str((revision.get("metadata") or {}).get("name") or "").strip()
+        if name:
+            return name
+    raise ReconcileError(
+        f"No Ready revision for {service_name} with commit {expected_commit!r}"
+    )
 
 
 def ensure_latest_traffic(
@@ -221,24 +259,18 @@ def ensure_latest_traffic(
             json_output=True,
             dry_run=dry_run,
         )
-        status = service.get("status", {}) if isinstance(service, Mapping) else {}
-        latest = str(status.get("latestReadyRevisionName") or "").strip()
-        if not latest:
-            raise ReconcileError(f"Unable to resolve latest ready revision for {target.service_name}")
-        if expected_commit:
-            actual_commit = _revision_commit(
-                project=project,
-                region=target_region,
-                revision=latest,
-                dry_run=dry_run,
+        target_revision = _resolve_revision_for_commit(
+            project=project,
+            region=target_region,
+            service_name=target.service_name,
+            expected_commit=expected_commit,
+            dry_run=dry_run,
+        )
+        if not _traffic_on_revision(service if isinstance(service, Mapping) else {}, target_revision):
+            print(
+                f"Updating {target.service_name} traffic to commit revision "
+                f"{target_revision} ({expected_commit})."
             )
-            if actual_commit != expected_commit:
-                raise ReconcileError(
-                    f"{target.service_name} latest revision {latest} commit {actual_commit!r} "
-                    f"does not match expected {expected_commit!r}"
-                )
-        if not _traffic_on_latest(service, latest):
-            print(f"Updating {target.service_name} traffic to latest revision {latest}.")
             _run(
                 [
                     "gcloud",
@@ -248,7 +280,7 @@ def ensure_latest_traffic(
                     target.service_name,
                     f"--project={project}",
                     f"--region={target_region}",
-                    "--to-latest",
+                    f"--to-revisions={target_revision}=100",
                     "--quiet",
                 ],
                 dry_run=dry_run,
@@ -267,12 +299,11 @@ def ensure_latest_traffic(
             json_output=True,
             dry_run=dry_run,
         )
-        verified_latest = str(verified.get("status", {}).get("latestReadyRevisionName") or "").strip()
-        if not verified_latest:
-            raise ReconcileError(f"Unable to resolve latest ready revision for {target.service_name}")
-        if not _traffic_on_latest(verified, verified_latest):
-            raise ReconcileError(f"{target.service_name} traffic is not 100% on latest revision")
-        print(f"Cloud Run traffic OK for {target.service_name}: {verified_latest}")
+        if not _traffic_on_revision(verified if isinstance(verified, Mapping) else {}, target_revision):
+            raise ReconcileError(
+                f"{target.service_name} traffic is not 100% on commit revision {target_revision}"
+            )
+        print(f"Cloud Run traffic OK for {target.service_name}: {target_revision}")
 
 
 def _legacy_jobs_for_target(platform: str, target: RuntimeTarget) -> list[str]:
