@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Callable
 
+from application.account_new_risk_gate_support import (
+    evaluate_cycle_new_risk_admission,
+    is_account_new_risk_gate_enabled,
+    new_risk_buy_prohibited,
+)
 from quant_platform_kit.common.models import ExecutionReport, OrderIntent
 from quant_platform_kit.ibkr.execution import submit_order_intent as _submit_order_intent
 
@@ -106,6 +111,21 @@ def submit_order_intent(
     """Submit an IBKR order with explicit TIF to avoid account-preset rejections."""
 
     intent = _intent_with_default_time_in_force(order_intent)
+    side_normalized = str(intent.side or "").strip().lower()
+    if is_account_new_risk_gate_enabled() and side_normalized.startswith("buy"):
+        admission = evaluate_cycle_new_risk_admission()
+        if new_risk_buy_prohibited(admission):
+            return ExecutionReport(
+                symbol=str(intent.symbol or "").strip().upper(),
+                side=side_normalized,
+                quantity=float(intent.quantity or 0.0),
+                status="rejected",
+                raw_payload={
+                    "detail": "account_new_risk_gate",
+                    "reason_codes": list(admission.reason_codes),
+                    "live_authority_granted": admission.live_authority_granted,
+                },
+            )
     return _submit_order_intent(
         ib,
         intent,

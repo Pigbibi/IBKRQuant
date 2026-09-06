@@ -1,8 +1,26 @@
 from types import SimpleNamespace
 
+import pytest
 from quant_platform_kit.common.models import OrderIntent
+from quant_platform_kit.risk.account_new_risk_gate import InjectedReconciliationSnapshot
 
+from application.account_new_risk_gate_support import set_cycle_snapshot
 from application.ibkr_order_execution import probe_order_write_access, submit_order_intent
+
+
+@pytest.fixture(autouse=True)
+def _healthy_account_new_risk_snapshot():
+    set_cycle_snapshot(
+        InjectedReconciliationSnapshot(
+            observation_status="COMPLETE",
+            reconciliation_status="VERIFIED",
+            circuit_breaker_state="CLOSED",
+            equity_usd=100_000.0,
+            peak_equity_usd=100_000.0,
+        )
+    )
+    yield
+    set_cycle_snapshot(None)
 
 
 class FakeMarketOrder:
