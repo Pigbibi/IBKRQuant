@@ -13,6 +13,14 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from application.account_new_risk_gate_support import (
+    build_portfolio_from_account_values,
+    build_snapshot_from_portfolio,
+    evaluate_account_values_new_risk_admission,
+    is_account_new_risk_gate_enabled,
+    new_risk_buy_prohibited,
+    set_cycle_snapshot,
+)
 from application.paper_execution_admission import evaluate_ibkr_paper_execution_admission
 try:
     from quant_platform_kit.common.cash_sweep import should_sell_cash_sweep_to_fund_whole_share_buy
@@ -1368,6 +1376,9 @@ def execute_rebalance(
         "small_account_allocation_drift_notes": [],
         "small_account_buy_blocked": False,
         "small_account_buy_block_reason": None,
+        "account_new_risk_buy_blocked": False,
+        "account_new_risk_block_reason": None,
+        "account_new_risk_reason_codes": [],
         "residual_cash_estimate": float(account_values.get("buying_power", 0.0) or 0.0),
         "projected_sell_release_value": 0.0,
         "current_stock_weight": 0.0,
@@ -1394,6 +1405,20 @@ def execute_rebalance(
             execution_summary["no_op_reason"] = "no_equity"
             return _finalize_result([translator("no_equity")], execution_summary, return_summary=return_summary)
     execution_summary["cash_only_deleverage_mode"] = cash_only_deleverage_mode
+
+    account_new_risk_buy_blocked = False
+    account_new_risk_reason_codes: tuple[str, ...] = ()
+    if is_account_new_risk_gate_enabled():
+        admission = evaluate_account_values_new_risk_admission(
+            account_values,
+            signal_metadata=signal_metadata,
+        )
+        account_new_risk_buy_blocked = new_risk_buy_prohibited(admission)
+        account_new_risk_reason_codes = tuple(admission.reason_codes)
+        portfolio = build_portfolio_from_account_values(account_values, signal_metadata=signal_metadata)
+        set_cycle_snapshot(build_snapshot_from_portfolio(portfolio))
+    else:
+        set_cycle_snapshot(None)
 
     reserved = max(
         float(equity) * float(cash_reserve_ratio or 0.0),
@@ -1726,6 +1751,8 @@ def execute_rebalance(
         and (target_mv[symbol] - current_mv.get(symbol, 0.0)) > threshold
         and abs(target_mv[symbol] - current_mv.get(symbol, 0.0)) > minimum_order_notional
     ]
+    if account_new_risk_buy_blocked:
+        funding_buy_candidates = []
     if (
         not has_sell_plan
         and funding_buy_candidates
@@ -1998,6 +2025,19 @@ def execute_rebalance(
                 "buy_deferred_small_account",
                 portfolio_equity=f"{float(equity or 0.0):,.2f}",
                 min_recommended_equity=f"{float(signal_metadata.get('min_recommended_equity_usd') or 0.0):,.2f}",
+            )
+        )
+    elif account_new_risk_buy_blocked and buy_needed_symbols:
+        buys_blocked_reason = "account_new_risk_gate"
+        execution_summary["account_new_risk_buy_blocked"] = True
+        execution_summary["account_new_risk_block_reason"] = buys_blocked_reason
+        execution_summary["account_new_risk_reason_codes"] = list(account_new_risk_reason_codes)
+        execution_summary["skipped_reasons"].append(buys_blocked_reason)
+        reason_text = ", ".join(account_new_risk_reason_codes) or "NEW_RISK_PROHIBITED"
+        trade_logs.append(
+            translator(
+                "buy_deferred",
+                detail=f"[Account new-risk gate] {reason_text}",
             )
         )
     if buys_blocked_reason is None and cash_only_execution and pending_sell_release_symbols and buy_needed_symbols:
