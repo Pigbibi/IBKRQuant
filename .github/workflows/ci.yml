@@ -59,7 +59,7 @@ jobs:
       - name: Check QPK pin consistency
         run: |
           set -euo pipefail
-          QPK_EXPECTED_PIN=c4f9b7599041406d4693083bf2eb4e85d6e10059 uv run --no-sync python scripts/check_qpk_pin_consistency.py
+          QPK_EXPECTED_PIN=cd6edbb32bb85ec6d280c2dafea4dd8ecd3ccdab uv run --no-sync python scripts/check_qpk_pin_consistency.py
 
       - name: Ensure uv.lock matches pyproject.toml
         run: uv lock --check
