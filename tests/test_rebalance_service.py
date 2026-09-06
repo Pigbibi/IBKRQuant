@@ -778,6 +778,7 @@ def claim_cycle(tmp_path, monkeypatch, strategy_module):
     config = IBKRRebalanceConfig(
         translator=_build_test_translator(), separator="---",
         strategy_profile="global_etf_rotation", execution_state_account_scope="PAPER",
+        account_ids=("DU1234567",),
         reconciliation_output_path=tmp_path / "reconciliation.json",
         notify_no_trade_cycles=False,
     )
@@ -851,9 +852,14 @@ def test_cycle_requires_claim_before_actual_submit(claim_cycle, case, side):
     elif case == "empty_key":
         state.metadata.pop("effective_date")
     elif case in {"false", "exception"}:
-        store = Mock(spec=("has_marker", "claim_marker", "record_marker"))
+        store = Mock(spec=("has_marker", "claim_marker", "record_marker", "read_marker"))
         store.has_marker.return_value = False
-        store.claim_marker.side_effect = [False if case == "false" else RuntimeError("synthetic failure"), True]
+        # First claim_marker is account-owner fence; second is execution claim.
+        store.claim_marker.side_effect = [
+            True,
+            False if case == "false" else RuntimeError("synthetic failure"),
+            True,
+        ]
         overrides["execution_state_store"] = store
     error = None
     try:
@@ -866,7 +872,7 @@ def test_cycle_requires_claim_before_actual_submit(claim_cycle, case, side):
         # A caller catching the first failure must not reclaim on its next intent.
         assert state.claim_callback() is False
         assert state.claim_callback() is False
-        assert store.claim_marker.call_count == 1
+        assert store.claim_marker.call_count == 2
         store.record_marker.assert_not_called()
 
 
@@ -915,13 +921,13 @@ def test_cycle_distinct_orders_share_one_successful_claim(claim_cycle):
     state.run(execution_dedup_enabled=True, execution_state_store=store)
     assert {intent.symbol for intent in state.submitted} == {"VOO", "SPY"}
     assert len(state.submitted) == 2
-    assert store.claim_marker.call_count == 1
+    assert store.claim_marker.call_count == 2
 
 
 @pytest.mark.parametrize("case", ["dry_run", "empty_plan", "no_signal", "admission_rejected"])
 def test_cycle_non_submission_paths_do_not_claim(claim_cycle, case):
     state = claim_cycle
-    store = Mock(spec=("has_marker", "claim_marker", "record_marker"))
+    store = Mock(spec=("has_marker", "claim_marker", "record_marker", "read_marker"))
     store.has_marker.return_value = False
     store.claim_marker.side_effect = RuntimeError("claim must not run")
     if case == "dry_run":

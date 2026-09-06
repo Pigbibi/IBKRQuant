@@ -25,6 +25,7 @@ class IBKRRebalanceConfig:
     execution_dedup_enabled: bool = False
     execution_state_store: Any = None
     execution_state_account_scope: str = ""
+    account_ids: tuple[str, ...] = ()
     paper_execution_admission_enabled: bool = False
     runtime_release_receipt: Any = None
     expected_strategy_release: Any = None
