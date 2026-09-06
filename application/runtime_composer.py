@@ -189,6 +189,7 @@ class IBKRRuntimeComposer:
                 project_id=self.project_id,
             ),
             execution_state_account_scope=execution_state_account_scope,
+            account_ids=tuple(self.account_ids),
             paper_execution_admission_enabled=resolve_paper_execution_admission_enabled(
                 env_reader=self.env_reader,
                 dry_run_only=self.dry_run_only,

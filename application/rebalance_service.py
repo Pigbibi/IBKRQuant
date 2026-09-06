@@ -17,7 +17,7 @@ from application.signal_snapshot import build_signal_snapshot
 from notifications.events import NotificationPublisher
 from notifications import renderers as notification_renderers
 from notifications.renderers import _build_order_batch_lines
-from quant_platform_kit.common.execution_state import build_execution_marker_key
+from quant_platform_kit.common.execution_state import build_execution_marker_key, claim_account_owner
 from quant_platform_kit.common.models import PortfolioSnapshot, Position
 from quant_platform_kit.common.quantity import format_quantity
 from quant_platform_kit.common.notification_localization import (
@@ -667,6 +667,82 @@ def _resolve_execution_account_scope(*, config: IBKRRebalanceConfig) -> str:
     return "PAPER" if bool(getattr(config, "dry_run_only", False)) else "LIVE"
 
 
+_FORBIDDEN_ACCOUNT_OWNER_LABELS = frozenset(
+    {
+        "PAPER",
+        "LIVE",
+        "DRY_RUN",
+        "DRY-RUN",
+        "DEFAULT",
+    }
+)
+
+
+def _normalize_account_owner_ids(raw) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        candidates = (raw,)
+    elif isinstance(raw, (list, tuple, set)):
+        candidates = tuple(raw)
+    else:
+        return ()
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return tuple(normalized)
+
+
+def _is_physical_ibkr_account_id(account_id: str) -> bool:
+    value = str(account_id or "").strip()
+    if not value:
+        return False
+    upper = value.upper()
+    if upper in _FORBIDDEN_ACCOUNT_OWNER_LABELS:
+        return False
+    # Reject execution-scope / account-group labels masquerading as account ids.
+    if upper in {"PAPER", "LIVE"} or "GROUP" in upper:
+        return False
+    return True
+
+
+def _resolve_physical_account_id(*, config: IBKRRebalanceConfig, snapshot) -> str:
+    """Resolve exactly one physical IBKR account id for the account-owner fence."""
+    configured = _normalize_account_owner_ids(getattr(config, "account_ids", ()))
+    metadata = getattr(snapshot, "metadata", None) or {}
+    from_snapshot = _normalize_account_owner_ids(
+        metadata.get("account_ids") if isinstance(metadata, Mapping) else ()
+    )
+    candidates = configured or from_snapshot
+    if not candidates:
+        raise RuntimeError(
+            "IBKR account owner fence requires configured account_ids "
+            "(refusing PAPER/LIVE/group labels as substitutes)"
+        )
+    if len(candidates) != 1:
+        raise RuntimeError(
+            "IBKR account owner fence requires exactly one physical account_id; "
+            f"got {len(candidates)}"
+        )
+    account_id = candidates[0]
+    if not _is_physical_ibkr_account_id(account_id):
+        raise RuntimeError(
+            "IBKR account owner fence requires a physical broker account_id; "
+            f"refusing label={account_id!r}"
+        )
+    scope = _resolve_execution_account_scope(config=config).strip().upper()
+    if scope and account_id.strip().upper() == scope:
+        raise RuntimeError(
+            "IBKR account owner fence refuses execution_state_account_scope as account_id"
+        )
+    return account_id
+
+
 def _build_execution_marker_key(*, config: IBKRRebalanceConfig, signal_metadata: dict) -> str:
     if not getattr(config, "execution_dedup_enabled", False):
         return ""
@@ -1064,6 +1140,37 @@ def run_strategy_core(
                     and execution_marker_key
                     and execution_state_store is not None
                 ):
+                    account_id = _resolve_physical_account_id(config=config, snapshot=snapshot)
+                    owner_id = (
+                        str(
+                            signal_metadata.get("strategy_profile")
+                            or getattr(config, "strategy_profile", "")
+                            or ""
+                        ).strip()
+                        or "unknown"
+                    )
+                    try:
+                        owner_claim = claim_account_owner(
+                            execution_state_store,
+                            broker="ibkr",
+                            account_id=account_id,
+                            owner_id=owner_id,
+                            metadata={
+                                "platform": "ibkr",
+                                "strategy_profile": owner_id,
+                                "dry_run_only": bool(getattr(config, "dry_run_only", False)),
+                            },
+                        )
+                    except Exception:
+                        raise RuntimeError(
+                            "IBKR account owner fence unavailable; refusing broker submission"
+                        ) from None
+                    if not owner_claim.allowed:
+                        raise RuntimeError(
+                            "IBKR account owner fence contested for "
+                            f"account={account_id}; owner={owner_claim.owner_id!r} "
+                            f"contested_by={owner_id!r}"
+                        )
                     try:
                         execution_claim_acquired = bool(execution_state_store.claim_marker(
                             execution_marker_key,
