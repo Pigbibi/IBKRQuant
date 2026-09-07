@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 
 
@@ -107,3 +108,65 @@ def test_runtime_composer_builds_runtime_and_config_from_local_builders():
     assert config.extra_notification_lines == ("plugin-line",)
     assert config.notify_no_trade_cycles is False
     assert reporting_adapters == "reporting-adapters"
+
+
+def test_runtime_composer_parks_live_without_durable_execution_claim_backend():
+    class MinimalComposer(IBKRRuntimeComposer):
+        pass
+
+    fields = {
+        "service_name": "ibkr",
+        "strategy_profile": "profile",
+        "strategy_domain": "us_equity",
+        "account_group": "LIVE",
+        "project_id": "project-1",
+        "instance_name": "gw",
+        "account_ids": ("U1",),
+        "strategy_target_mode": "weight",
+        "strategy_artifact_dir": "/tmp",
+        "strategy_display_name": "Profile",
+        "strategy_display_name_localized": "Profile",
+        "managed_symbols": (),
+        "signal_effective_after_trading_days": 1,
+        "signal_source": "market_data",
+        "status_icon": "*",
+        "safe_haven": "BIL",
+        "dry_run_only": False,
+        "strategy_config_source": "env",
+        "ib_gateway_host_resolver": lambda: "127.0.0.1",
+        "ib_gateway_port": 4001,
+        "ib_gateway_mode": "live",
+        "ib_gateway_ip_mode": "internal",
+        "ib_client_id": 1,
+        "ib_connect_timeout_seconds": 60,
+        "feature_snapshot_path": None,
+        "feature_snapshot_manifest_path": None,
+        "strategy_config_path": None,
+        "reconciliation_output_path": "/tmp/reconciliation.json",
+        "translator": lambda key, **_kwargs: key,
+        "separator": "-",
+        "send_message": lambda _message: None,
+        "connect_ib_fn": lambda: None,
+        "build_portfolio_snapshot_fn": lambda _ib: None,
+        "compute_signals_fn": None,
+        "execute_rebalance_fn": None,
+        "run_id_builder": lambda: "run",
+        "event_logger": None,
+        "report_builder": None,
+        "report_persister": None,
+        "trace_extractor": None,
+        "env_reader": lambda _name, default="": default,
+    }
+    composer = MinimalComposer(**fields)
+
+    try:
+        composer.build_rebalance_config()
+    except RuntimeError as exc:
+        assert "requires a gs:// execution state URI" in str(exc)
+    else:
+        raise AssertionError("live execution must fail closed without durable atomic claims")
+
+    dry = replace(composer, dry_run_only=True)
+    dry_config = dry.build_rebalance_config()
+    assert dry_config.dry_run_only is True
+    assert not str(dry_config.execution_state_store.cloud_prefix_uri or "").startswith("gs://")
