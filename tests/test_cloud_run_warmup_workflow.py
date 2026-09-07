@@ -66,3 +66,13 @@ def test_lifecycle_observes_the_exact_existing_service_binding() -> None:
     assert "cloud-run-region: ${{ env.CLOUD_RUN_REGION }}" in publish
     assert "cloud-run-service: ${{ matrix.target.service }}" in publish
     assert "scheduler-location: ${{ env.RUNTIME_HEARTBEAT_SCHEDULER_LOCATION }}" in publish
+
+
+def test_lifecycle_observes_production_drift_without_optimization() -> None:
+    workflow = Path(".github/workflows/runtime-target-lifecycle.yml").read_text(encoding="utf-8")
+
+    assert "scripts/production_drift_health_observe.py" in workflow
+    assert "id: production_drift" in workflow
+    assert "LIFECYCLE_PERFORMANCE_BUCKET" in workflow
+    assert "| Production drift |" in workflow
+    assert "run_research_promotion_cycle" not in workflow
