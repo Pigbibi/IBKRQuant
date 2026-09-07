@@ -124,6 +124,13 @@ def new_risk_buy_prohibited(result: NewRiskAdmissionResult) -> bool:
     return result.disposition == NewRiskDisposition.NEW_RISK_PROHIBITED
 
 
+def apply_combined_scale(value: float, scale: float | None) -> float:
+    """Apply a valid reducing scale; missing or out-of-range values are a no-op."""
+    if scale is None or not math.isfinite(scale) or not 0.0 < scale <= 1.0:
+        return value
+    return value * scale
+
+
 def get_cycle_snapshot() -> InjectedReconciliationSnapshot | None:
     return _cycle_snapshot
 

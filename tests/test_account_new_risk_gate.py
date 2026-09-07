@@ -15,6 +15,7 @@ from quant_platform_kit.risk.account_new_risk_gate import (
 
 from application.account_new_risk_gate_support import (
     ACCOUNT_NEW_RISK_GATE_ENV,
+    apply_combined_scale,
     build_portfolio_from_account_values,
     evaluate_account_values_new_risk_admission,
     evaluate_cycle_new_risk_admission,
@@ -92,6 +93,10 @@ def test_build_portfolio_from_account_values_maps_equity():
     assert portfolio["peak_equity_usd"] == 55_000.0
 
 
+def test_missing_combined_scale_is_no_op():
+    assert apply_combined_scale(4.0, None) == 4.0
+
+
 def test_submit_order_intent_rejects_buy_when_gate_prohibits():
     set_cycle_snapshot(
         InjectedReconciliationSnapshot(
@@ -115,6 +120,28 @@ def test_submit_order_intent_rejects_buy_when_gate_prohibits():
     assert "EQUITY_UNKNOWN_FAIL_CLOSED" in report.raw_payload.get("reason_codes", [])
 
 
+def test_submit_order_intent_halves_buy_quantity_for_half_scale():
+    set_cycle_snapshot(
+        InjectedReconciliationSnapshot(
+            observation_status="COMPLETE",
+            reconciliation_status="VERIFIED",
+            circuit_breaker_state="CLOSED",
+            equity_usd=40_000.0,
+            drawdown_from_peak=0.075,
+        )
+    )
+    expected = SimpleNamespace(status="Submitted")
+    with mock.patch(
+        "application.ibkr_order_execution._submit_order_intent",
+        return_value=expected,
+    ) as submit_mock:
+        submit_order_intent(
+            SimpleNamespace(),
+            OrderIntent(symbol="SPY", side="buy", quantity=4.0),
+        )
+    assert submit_mock.call_args.args[1].quantity == 2.0
+
+
 def test_submit_order_intent_allows_sell_when_gate_prohibits():
     set_cycle_snapshot(
         InjectedReconciliationSnapshot(
@@ -135,6 +162,7 @@ def test_submit_order_intent_allows_sell_when_gate_prohibits():
             OrderIntent(symbol="SPY", side="sell", quantity=1.0),
         )
     submit_mock.assert_called_once()
+    assert submit_mock.call_args.args[1].quantity == 1.0
 
 
 def test_submit_order_intent_skips_gate_when_disabled():
