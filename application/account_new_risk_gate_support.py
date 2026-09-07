@@ -15,6 +15,10 @@ from quant_platform_kit.risk.account_new_risk_gate import (
     NewRiskDisposition,
     evaluate_new_risk_admission,
 )
+from quant_platform_kit.risk.cycle_new_risk_health import (
+    CycleNewRiskHealthEvidence,
+    apply_cycle_new_risk_health_axes,
+)
 
 ACCOUNT_NEW_RISK_GATE_ENV = "ACCOUNT_NEW_RISK_GATE"
 
@@ -50,18 +54,55 @@ def _resolve_equity_usd(portfolio: Mapping[str, Any], execution: Mapping[str, An
     return None
 
 
+def _portfolio_metadata(portfolio: Mapping[str, Any]) -> Mapping[str, Any]:
+    metadata = portfolio.get("metadata")
+    return metadata if isinstance(metadata, Mapping) else {}
+
+
+def _resolve_unknown_pending(portfolio: Mapping[str, Any], projection: Mapping[str, Any]) -> bool:
+    """Only an explicit unknown-pending signal counts; absence is never treated as pending."""
+    if "unknown_pending_orders" in projection:
+        return bool(projection.get("unknown_pending_orders"))
+    if portfolio.get("unknown_pending_orders") is not None:
+        return bool(portfolio.get("unknown_pending_orders"))
+    return bool(_portfolio_metadata(portfolio).get("unknown_pending_orders"))
+
+
+def _resolve_durable_breaker_open(portfolio: Mapping[str, Any], projection: Mapping[str, Any]) -> bool:
+    """Only an explicit durable OPEN state trips the breaker; absence is never OPEN."""
+    for source in (projection, portfolio, _portfolio_metadata(portfolio)):
+        value = source.get("durable_circuit_breaker_state")
+        if value is not None:
+            return str(value).strip().upper() == "OPEN"
+    return False
+
+
 def build_account_new_risk_snapshot(
     portfolio: Mapping[str, Any],
     *,
     execution: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build an explicit fail-closed projection from evidence available this cycle."""
+    """Build a cycle-health projection from evidence available this cycle.
+
+    ``observation_ok`` reflects whether equity resolved this cycle;
+    ``unknown_pending`` and ``durable_breaker_open`` only trip on an explicit
+    signal from the portfolio or its ``metadata`` -- their absence is never
+    mistaken for a durable OPEN breaker or pending reconciliation. Explicit
+    keys already present on an injected ``account_new_risk_snapshot`` always
+    win over the projected axes (tests / HITL overrides).
+    """
     projection = dict(portfolio.get("account_new_risk_snapshot") or {})
-    projection.setdefault("observation_status", "UNAVAILABLE")
-    projection.setdefault("reconciliation_status", "UNVERIFIED")
-    projection.setdefault("circuit_breaker_state", "OPEN")
-    if "equity_usd" not in projection:
-        projection["equity_usd"] = _resolve_equity_usd(portfolio, execution)
+    equity_usd = _coerce_optional_float(projection.get("equity_usd"))
+    if equity_usd is None:
+        equity_usd = _resolve_equity_usd(portfolio, execution)
+
+    evidence = CycleNewRiskHealthEvidence(
+        observation_ok=equity_usd is not None,
+        unknown_pending=_resolve_unknown_pending(portfolio, projection),
+        durable_breaker_open=_resolve_durable_breaker_open(portfolio, projection),
+    )
+    projection = apply_cycle_new_risk_health_axes(projection, evidence)
+    projection["equity_usd"] = equity_usd
     return projection
 
 
@@ -75,6 +116,11 @@ def build_portfolio_from_account_values(
     portfolio: dict[str, Any] = {
         "total_equity": _coerce_optional_float(account_values.get("equity")),
     }
+    for key in ("unknown_pending_orders", "durable_circuit_breaker_state"):
+        if key in account_values:
+            portfolio[key] = account_values[key]
+        elif key in metadata:
+            portfolio[key] = metadata[key]
     portfolio["account_new_risk_snapshot"] = build_account_new_risk_snapshot(
         {
             **portfolio,
