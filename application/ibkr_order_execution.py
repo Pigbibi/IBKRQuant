@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any, Callable
 
 from application.account_new_risk_gate_support import (
+    apply_combined_scale,
     evaluate_cycle_new_risk_admission,
     is_account_new_risk_gate_enabled,
     new_risk_buy_prohibited,
@@ -126,6 +127,10 @@ def submit_order_intent(
                     "live_authority_granted": admission.live_authority_granted,
                 },
             )
+        intent = replace(
+            intent,
+            quantity=apply_combined_scale(intent.quantity, admission.combined_scale),
+        )
     return _submit_order_intent(
         ib,
         intent,
