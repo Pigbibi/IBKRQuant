@@ -18,12 +18,6 @@ from quant_platform_kit.risk.account_new_risk_gate import (
 
 ACCOUNT_NEW_RISK_GATE_ENV = "ACCOUNT_NEW_RISK_GATE"
 
-_DEFAULT_HEALTH = {
-    "observation_status": "COMPLETE",
-    "reconciliation_status": "VERIFIED",
-    "circuit_breaker_state": "CLOSED",
-}
-
 _cycle_snapshot: InjectedReconciliationSnapshot | None = None
 
 
@@ -86,15 +80,9 @@ def build_snapshot_from_portfolio(
     if equity_usd is None:
         equity_usd = _resolve_equity_usd(portfolio, execution)
     return InjectedReconciliationSnapshot(
-        observation_status=str(
-            projection.get("observation_status") or _DEFAULT_HEALTH["observation_status"]
-        ),
-        reconciliation_status=str(
-            projection.get("reconciliation_status") or _DEFAULT_HEALTH["reconciliation_status"]
-        ),
-        circuit_breaker_state=str(
-            projection.get("circuit_breaker_state") or _DEFAULT_HEALTH["circuit_breaker_state"]
-        ),
+        observation_status=str(projection.get("observation_status") or "UNAVAILABLE"),
+        reconciliation_status=str(projection.get("reconciliation_status") or "UNVERIFIED"),
+        circuit_breaker_state=str(projection.get("circuit_breaker_state") or "OPEN"),
         equity_usd=equity_usd,
         peak_equity_usd=_coerce_optional_float(projection.get("peak_equity_usd"))
         if "peak_equity_usd" in projection

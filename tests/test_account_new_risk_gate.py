@@ -59,10 +59,24 @@ def test_drawdown_brake_prohibits_new_risk():
     assert result.live_authority_granted is False
 
 
-def test_healthy_equity_allows_new_risk():
+def test_equity_without_snapshot_prohibits_new_risk():
     portfolio = {
         "total_equity": 100_000.0,
         "peak_equity_usd": 100_000.0,
+    }
+    result = evaluate_portfolio_new_risk_admission(portfolio)
+    assert result.disposition == NewRiskDisposition.NEW_RISK_PROHIBITED
+
+
+def test_explicit_healthy_snapshot_allows_new_risk():
+    portfolio = {
+        "total_equity": 100_000.0,
+        "peak_equity_usd": 100_000.0,
+        "account_new_risk_snapshot": {
+            "observation_status": "COMPLETE",
+            "reconciliation_status": "VERIFIED",
+            "circuit_breaker_state": "CLOSED",
+        },
     }
     result = evaluate_portfolio_new_risk_admission(portfolio)
     assert result.disposition == NewRiskDisposition.ALLOW_NEW_RISK

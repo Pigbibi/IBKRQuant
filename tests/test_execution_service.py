@@ -29,6 +29,14 @@ def _signal_metadata(
     **extra,
 ):
     payload = dict(extra)
+    payload.setdefault(
+        "account_new_risk_snapshot",
+        {
+            "observation_status": "COMPLETE",
+            "reconciliation_status": "VERIFIED",
+            "circuit_breaker_state": "CLOSED",
+        },
+    )
     payload["allocation"] = _weight_allocation(
         targets,
         risk_symbols=risk_symbols,
