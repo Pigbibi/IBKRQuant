@@ -45,10 +45,14 @@ def test_gate_disabled_when_env_zero():
 
 
 def test_missing_equity_prohibits_new_risk():
+    # Missing equity keeps observation_ok=False, which still fails closed via
+    # EQUITY_UNKNOWN_FAIL_CLOSED in the gate below -- the circuit-breaker axis
+    # is not durably OPEN here since there is no explicit unknown-pending /
+    # durable-breaker evidence this cycle.
     assert build_account_new_risk_snapshot({}) == {
         "observation_status": "UNAVAILABLE",
         "reconciliation_status": "UNVERIFIED",
-        "circuit_breaker_state": "OPEN",
+        "circuit_breaker_state": "CLOSED",
         "equity_usd": None,
     }
     result = evaluate_account_values_new_risk_admission({"equity": 0.0})
@@ -67,13 +71,16 @@ def test_drawdown_brake_prohibits_new_risk():
     assert result.live_authority_granted is False
 
 
-def test_equity_without_snapshot_prohibits_new_risk():
+def test_healthy_equity_without_explicit_snapshot_allows_new_risk():
+    # A plain healthy-equity portfolio (no explicit snapshot, no drawdown)
+    # now derives COMPLETE/VERIFIED/CLOSED via cycle-health instead of
+    # failing closed on the old blanket UNAVAILABLE/UNVERIFIED/OPEN defaults.
     portfolio = {
         "total_equity": 100_000.0,
         "peak_equity_usd": 100_000.0,
     }
     result = evaluate_portfolio_new_risk_admission(portfolio)
-    assert result.disposition == NewRiskDisposition.NEW_RISK_PROHIBITED
+    assert result.disposition == NewRiskDisposition.ALLOW_NEW_RISK
 
 
 def test_explicit_healthy_snapshot_allows_new_risk():
@@ -91,6 +98,33 @@ def test_explicit_healthy_snapshot_allows_new_risk():
     assert result.live_authority_granted is False
 
 
+def test_unknown_pending_orders_prohibits_and_opens_breaker():
+    portfolio = {
+        "total_equity": 50_000.0,
+        "unknown_pending_orders": True,
+    }
+    snapshot = build_account_new_risk_snapshot(portfolio)
+    assert snapshot["observation_status"] == "COMPLETE"
+    assert snapshot["reconciliation_status"] == "UNVERIFIED"
+    assert snapshot["circuit_breaker_state"] == "OPEN"
+    result = evaluate_portfolio_new_risk_admission(portfolio)
+    assert result.disposition == NewRiskDisposition.NEW_RISK_PROHIBITED
+    assert "CIRCUIT_BREAKER_OPEN" in result.reason_codes
+    assert "RECONCILIATION_NOT_VERIFIED" in result.reason_codes
+
+
+def test_durable_circuit_breaker_open_prohibits_new_risk():
+    portfolio = {
+        "total_equity": 50_000.0,
+        "durable_circuit_breaker_state": "OPEN",
+    }
+    snapshot = build_account_new_risk_snapshot(portfolio)
+    assert snapshot["circuit_breaker_state"] == "OPEN"
+    result = evaluate_portfolio_new_risk_admission(portfolio)
+    assert result.disposition == NewRiskDisposition.NEW_RISK_PROHIBITED
+    assert "CIRCUIT_BREAKER_OPEN" in result.reason_codes
+
+
 def test_build_portfolio_from_account_values_maps_equity():
     portfolio = build_portfolio_from_account_values(
         {"equity": 50_000.0},
@@ -99,9 +133,9 @@ def test_build_portfolio_from_account_values_maps_equity():
     assert portfolio["total_equity"] == 50_000.0
     assert portfolio["peak_equity_usd"] == 55_000.0
     assert portfolio["account_new_risk_snapshot"] == {
-        "observation_status": "UNAVAILABLE",
-        "reconciliation_status": "UNVERIFIED",
-        "circuit_breaker_state": "OPEN",
+        "observation_status": "COMPLETE",
+        "reconciliation_status": "VERIFIED",
+        "circuit_breaker_state": "CLOSED",
         "equity_usd": 50_000.0,
     }
 
