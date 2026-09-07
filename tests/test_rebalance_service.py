@@ -768,6 +768,11 @@ def claim_cycle(tmp_path, monkeypatch, strategy_module):
     metadata = {
         "strategy_profile": "global_etf_rotation",
         "effective_date": "2026-04-01",
+        "account_new_risk_snapshot": {
+            "observation_status": "COMPLETE",
+            "reconciliation_status": "VERIFIED",
+            "circuit_breaker_state": "CLOSED",
+        },
         "allocation": _weight_allocation({"VOO": 0.5}, risk_symbols=("VOO",)),
     }
     ib = SimpleNamespace(
