@@ -59,6 +59,8 @@ jobs:
       RUNTIME_HEARTBEAT_SCHEDULER_AWARE: ${{ vars.RUNTIME_HEARTBEAT_SCHEDULER_AWARE || 'true' }}
       RUNTIME_HEARTBEAT_SCHEDULER_LOCATION: ${{ vars.RUNTIME_HEARTBEAT_SCHEDULER_LOCATION || 'us-central1' }}
       EXECUTION_EVIDENCE_SYNC_URL: ${{ vars.EXECUTION_EVIDENCE_SYNC_URL }}
+      LIFECYCLE_PERFORMANCE_BUCKET: ${{ vars.LIFECYCLE_PERFORMANCE_BUCKET }}
+      PRODUCTION_DRIFT_DOMAIN: ${{ vars.PRODUCTION_DRIFT_DOMAIN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -175,6 +177,41 @@ jobs:
           fi
           echo "status=$status" >> "$GITHUB_OUTPUT"
 
+      - name: Observe production drift without optimization side effects
+        id: production_drift
+        run: |
+          set -uo pipefail
+          export RUNTIME_TARGET_JSON="$(cat runtime-target.json)"
+          set +e
+          uv run --no-sync python scripts/production_drift_health_observe.py > production-drift.log 2>&1
+          exit_code=$?
+          set -e
+          cat production-drift.log
+          if [ "$exit_code" -ne 0 ]; then
+            status=unavailable
+          else
+            status="$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          raw = Path("production-drift.log").read_text().strip().splitlines()
+          payload = {}
+          for line in reversed(raw):
+              line = line.strip()
+              if line.startswith("{") and line.endswith("}"):
+                  payload = json.loads(line)
+                  break
+          status = str(payload.get("status") or "unavailable").strip().lower()
+          if status in {"healthy", "parked"}:
+              print("pass" if status == "healthy" else "not_due")
+          elif status in {"review", "critical", "watch"}:
+              print("attention")
+          else:
+              print("unavailable")
+          PY
+            )"
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
       - name: Detect unified control-plane ingress
         id: lifecycle_ingress
         env:
@@ -224,6 +261,7 @@ jobs:
             echo "| Intended lane | ${{ steps.target_state.outputs.execution_mode }} |"
             echo "| Runtime guard | ${{ steps.runtime_guard.outputs.status }} |"
             echo "| Execution heartbeat | ${{ steps.execution_heartbeat.outputs.status }} |"
+            echo "| Production drift | ${{ steps.production_drift.outputs.status }} |"
             echo
             echo "This workflow is read-only: it cannot enable a target, alter its lane, or submit an order."
           } >> "$GITHUB_STEP_SUMMARY"
