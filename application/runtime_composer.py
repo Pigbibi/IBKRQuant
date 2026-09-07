@@ -166,6 +166,15 @@ class IBKRRuntimeComposer:
         execution_state_account_scope = (
             "PAPER" if self.dry_run_only else str(self.account_group or "LIVE").strip().upper()
         )
+        execution_state_store = build_execution_marker_store_from_env(
+            platform_env_prefix="IBKR",
+            env_reader=self.env_reader,
+            project_id=self.project_id,
+        )
+        if not self.dry_run_only and not str(execution_state_store.cloud_prefix_uri or "").startswith("gs://"):
+            raise RuntimeError(
+                "IBKR live execution requires a gs:// execution state URI for atomic claims"
+            )
         return IBKRRebalanceConfig(
             translator=self.translator,
             separator=self.separator,
@@ -183,11 +192,7 @@ class IBKRRuntimeComposer:
                 dry_run_only=self.dry_run_only,
                 account_scope=execution_state_account_scope,
             ),
-            execution_state_store=build_execution_marker_store_from_env(
-                platform_env_prefix="IBKR",
-                env_reader=self.env_reader,
-                project_id=self.project_id,
-            ),
+            execution_state_store=execution_state_store,
             execution_state_account_scope=execution_state_account_scope,
             account_ids=tuple(self.account_ids),
             paper_execution_admission_enabled=resolve_paper_execution_admission_enabled(
