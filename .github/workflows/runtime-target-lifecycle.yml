@@ -226,7 +226,7 @@ jobs:
 
       - name: Publish lifecycle to the unified control plane
         if: ${{ steps.lifecycle_ingress.outputs.enabled == 'true' }}
-        uses: QuantStrategyLab/QuantRuntimeSettings/actions/publish-runtime-target-lifecycle@c2e46314fd749fd40f4d5fbdbaedadc8b7b27dff
+        uses: QuantStrategyLab/QuantRuntimeSettings/actions/publish-runtime-target-lifecycle@00c9f893b9f13def770a479d9162f88dd1367836
         with:
           source-id: ibkr.${{ matrix.target.id }}
           target-id: ibkr.${{ matrix.target.id }}
