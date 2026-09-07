@@ -16,6 +16,7 @@ from quant_platform_kit.risk.account_new_risk_gate import (
 from application.account_new_risk_gate_support import (
     ACCOUNT_NEW_RISK_GATE_ENV,
     apply_combined_scale,
+    build_account_new_risk_snapshot,
     build_portfolio_from_account_values,
     evaluate_account_values_new_risk_admission,
     evaluate_cycle_new_risk_admission,
@@ -44,6 +45,12 @@ def test_gate_disabled_when_env_zero():
 
 
 def test_missing_equity_prohibits_new_risk():
+    assert build_account_new_risk_snapshot({}) == {
+        "observation_status": "UNAVAILABLE",
+        "reconciliation_status": "UNVERIFIED",
+        "circuit_breaker_state": "OPEN",
+        "equity_usd": None,
+    }
     result = evaluate_account_values_new_risk_admission({"equity": 0.0})
     assert result.disposition == NewRiskDisposition.NEW_RISK_PROHIBITED
     assert "EQUITY_UNKNOWN_FAIL_CLOSED" in result.reason_codes
@@ -91,6 +98,12 @@ def test_build_portfolio_from_account_values_maps_equity():
     )
     assert portfolio["total_equity"] == 50_000.0
     assert portfolio["peak_equity_usd"] == 55_000.0
+    assert portfolio["account_new_risk_snapshot"] == {
+        "observation_status": "UNAVAILABLE",
+        "reconciliation_status": "UNVERIFIED",
+        "circuit_breaker_state": "OPEN",
+        "equity_usd": 50_000.0,
+    }
 
 
 def test_missing_combined_scale_is_no_op():
