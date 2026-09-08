@@ -32,6 +32,16 @@ def attach_cycle_execution_receipt(
     array; no status label or local marker is promoted to a fill.
     """
 
+    runtime_loaded = report.get("runtime_release_receipt")
+    if (
+        isinstance(runtime_loaded, Mapping)
+        and runtime_loaded.get("attestation_state") == "legacy_unattested"
+        and runtime_loaded.get("strategy_release") is None
+    ):
+        # Legacy targets remain evidence-missing; optional reporting must not
+        # turn an already-completed cycle into an HTTP failure and retry.
+        return report
+
     summary = _combined_summary(execution_summary, reconciliation_record)
     status = str(summary.get("execution_status") or "").strip().lower()
     reconciliation_required = status == "pending_reconciliation" or _has_any(summary, _PENDING_KEYS)
