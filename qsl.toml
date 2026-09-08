@@ -6,7 +6,7 @@ allow_legacy = false
 
 [qsl.requires]
 quant_platform_kit = "86ddc40acfc96965f98d6fa27632fcb6c74f61a5"
-us_equity_strategies = "59a6e4341bf12cf1e27953b9c2d3705bc0335d96"
+us_equity_strategies = "c31f28484b8489a1ecda8e595a6d2afd3bce8185"
 hk_equity_strategies = "709e5e1cde7841aed538d94eb26b552b46cb7806"
 
 [qsl.compat]
