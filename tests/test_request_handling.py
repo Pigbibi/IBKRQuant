@@ -1323,7 +1323,7 @@ def test_handle_request_runtime_error_fallback_sends_telegram(strategy_module, m
     assert len(sent_payloads) == 1
     assert sent_payloads[0][0]["chat_id"] == "chat-1"
     assert "IBKR strategy run failed" in sent_payloads[0][0]["text"]
-    assert "RuntimeError: boom" in sent_payloads[0][0]["text"]
+    assert "boom" not in sent_payloads[0][0]["text"]
 
 
 def test_handle_request_runtime_error_fallback_uses_chinese_copy(strategy_module_factory, monkeypatch):
@@ -1350,8 +1350,8 @@ def test_handle_request_runtime_error_fallback_uses_chinese_copy(strategy_module
     assert body == "Error"
     text = sent_payloads[0][0]["text"]
     assert "IBKR 策略运行失败" in text
-    assert "账户组:" in text
-    assert "错误: RuntimeError: boom" in text
+    assert "运行目标：" in text
+    assert "boom" not in text
 
 
 def test_handle_request_runtime_error_fallback_prefixes_account_scope(strategy_module_factory, monkeypatch):
@@ -1393,7 +1393,7 @@ def test_handle_request_runtime_error_fallback_prefixes_account_scope(strategy_m
 
     assert status == 500
     assert body == "Error"
-    assert sent_payloads[0][0]["text"].startswith("[U1234567] IBKR strategy run failed")
+    assert sent_payloads[0][0]["text"].startswith("[U1234567] ⚠️ IBKR strategy run failed")
 
 
 def test_handle_reconciliation_persists_and_logs_only_redacted_failure_fields(
