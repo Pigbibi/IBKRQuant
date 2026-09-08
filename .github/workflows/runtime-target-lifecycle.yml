@@ -38,9 +38,6 @@ jobs:
           - id: russell_top50_leader_rotation
             label: Russell top-50 leader rotation
             service: interactive-brokers-quant-live-u18336562-service
-          - id: us_combo_shadow
-            label: US combo shadow
-            service: interactive-brokers-us-combo-shadow-service
     permissions:
       contents: read
       id-token: write
