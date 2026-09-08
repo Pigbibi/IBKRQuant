@@ -7,7 +7,6 @@ import os
 import re
 import threading
 import time
-import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -1714,19 +1713,19 @@ def _handle_request(
         append_runtime_report_error(
             report,
             stage="strategy_cycle",
-            message=str(exc),
+            message="strategy_cycle_failed",
             error_type=type(exc).__name__,
         )
         finalize_runtime_report(report, status="error")
         log_runtime_event(
             log_context,
             "strategy_cycle_failed",
-            message="Strategy execution failed",
+            message=t("runtime_failure_log"),
             severity="ERROR",
             error_type=type(exc).__name__,
-            error_message=str(exc),
+            error_message="strategy_cycle_failed",
         )
-        error_msg = f"{t('error_title')}\n{traceback.format_exc()}"
+        error_msg = _runtime_error_notification_message(exc)
         _publish_runtime_failure_notification(
             detailed_text=error_msg,
             compact_text=error_msg,
