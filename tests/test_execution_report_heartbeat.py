@@ -584,6 +584,158 @@ def test_main_rejects_previous_session_report_after_a_new_session_is_due(
     assert "predates latest due schedule" in output
 
 
+def test_main_reports_backend_from_newest_accepted_required_target_report(
+    monkeypatch,
+    capsys,
+):
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("RUNTIME_HEARTBEAT_NAME", "IBKR runtime")
+    monkeypatch.setenv("RUNTIME_HEARTBEAT_REQUIRED_SERVICES", "svc-us")
+    monkeypatch.setenv("RUNTIME_HEARTBEAT_GCS_URIS", "gs://bucket/reports")
+    monkeypatch.setenv(
+        "CLOUD_RUN_SERVICE_TARGETS_JSON",
+        json.dumps(
+            {
+                "targets": [
+                    {
+                        "service": "svc-us",
+                        "runtime_target": {
+                            "service_name": "svc-us",
+                            "strategy_profile": "us-strategy",
+                            "account_scope": "US",
+                            "scheduler": {
+                                "timezone": "UTC",
+                                "main_time": "0 8 * * *",
+                            },
+                        },
+                    }
+                ]
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "_list_gcs_objects",
+        lambda *_args, **_kwargs: [
+            {
+                "url": "gs://bucket/reports/newer.json",
+                "metadata": {"updated": "2026-09-09T10:00:00Z"},
+            },
+            {
+                "url": "gs://bucket/reports/older.json",
+                "metadata": {"updated": "2026-09-09T09:00:00Z"},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "_cat_gcs_json",
+        lambda uri, **_kwargs: {
+            "status": "ok",
+            "service_name": "svc-us",
+            "strategy_profile": "us-strategy",
+            "account_scope": "US",
+            "execution_backend": "gateway" if uri.endswith("newer.json") else "quantconnect",
+        },
+    )
+
+    result = heartbeat.main(now=dt.datetime(2026, 9, 9, 10, 30, tzinfo=dt.timezone.utc))
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "svc-us[us-strategy/US]@2026-09-09T10:00:00+00:00 backend=gateway" in output
+    assert "quantconnect" not in output
+
+
+@pytest.mark.parametrize(
+    "execution_backend",
+    [None, 1, "gateway;secret=not-a-backend", "GATEWAY"],
+)
+def test_main_reports_unknown_backend_for_noncanonical_no_required_report(
+    monkeypatch,
+    capsys,
+    execution_backend,
+):
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("RUNTIME_HEARTBEAT_NAME", "IBKR runtime")
+    monkeypatch.setenv("RUNTIME_HEARTBEAT_GCS_URIS", "gs://bucket/reports")
+    monkeypatch.setattr(
+        heartbeat,
+        "_list_gcs_objects",
+        lambda *_args, **_kwargs: [
+            {
+                "url": "gs://bucket/reports/accepted.json",
+                "metadata": {"updated": "2026-09-09T10:00:00Z"},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "_cat_gcs_json",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "service_name": "svc-us",
+            "execution_backend": execution_backend,
+        },
+    )
+
+    result = heartbeat.main(now=dt.datetime(2026, 9, 9, 10, 30, tzinfo=dt.timezone.utc))
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "backend=unknown" in output
+    if isinstance(execution_backend, str):
+        assert execution_backend not in output
+
+
+def test_main_does_not_use_rejected_report_backend_for_no_required_report(
+    monkeypatch,
+    capsys,
+):
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("RUNTIME_HEARTBEAT_NAME", "IBKR runtime")
+    monkeypatch.setenv("RUNTIME_HEARTBEAT_GCS_URIS", "gs://bucket/reports")
+    monkeypatch.setattr(
+        heartbeat,
+        "_list_gcs_objects",
+        lambda *_args, **_kwargs: [
+            {
+                "url": "gs://bucket/reports/rejected.json",
+                "metadata": {"updated": "2026-09-09T10:00:00Z"},
+            },
+            {
+                "url": "gs://bucket/reports/accepted.json",
+                "metadata": {"updated": "2026-09-09T09:00:00Z"},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "_cat_gcs_json",
+        lambda uri, **_kwargs: (
+            {
+                "status": "ok",
+                "service_name": "svc-us",
+                "execution_backend": "gateway",
+                "summary": {"execution_status": "blocked", "no_op_reason": "no_equity"},
+            }
+            if uri.endswith("rejected.json")
+            else {
+                "status": "ok",
+                "service_name": "svc-us",
+                "execution_backend": "quantconnect",
+            }
+        ),
+    )
+
+    result = heartbeat.main(now=dt.datetime(2026, 9, 9, 10, 30, tzinfo=dt.timezone.utc))
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "backend=quantconnect" in output
+    assert "backend=gateway" not in output
+
+
 def test_report_with_blocked_execution_status_is_rejected_even_when_top_level_is_ok():
     accepted, reason = heartbeat._is_accepted_report(
         {

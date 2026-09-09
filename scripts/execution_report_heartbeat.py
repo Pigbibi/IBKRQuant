@@ -51,11 +51,21 @@ except ModuleNotFoundError:
 DEFAULT_ACCEPT_STATUSES = {"ok", "skipped", "success", "completed", "no_action"}
 DEFAULT_REJECT_STATUSES = {"error", "failed", "failure", "cancelled", "canceled", "timed_out"}
 DEFAULT_REJECT_EXECUTION_STATUSES = {"error", "failed", "failure"}
+REPORTABLE_EXECUTION_BACKENDS = frozenset({"gateway", "quantconnect"})
 EXPECTED_EXECUTION_GUARD_REASON_PREFIXES = (
     "pending_orders_detected:",
     "same_day_fills_detected:",
     "same_day_execution_locked:",
 )
+
+
+def _report_execution_backend(payload: Mapping[str, Any]) -> str:
+    backend = payload.get("execution_backend")
+    if isinstance(backend, str) and backend in REPORTABLE_EXECUTION_BACKENDS:
+        return backend
+    return "unknown"
+
+
 DEFAULT_ACCEPT_STAGES = {
     "DRY_RUN_COMPLETED",
     "FUNDING_BLOCKED",
@@ -1146,8 +1156,8 @@ def main(now: dt.datetime | None = None) -> int:
             list_errors.append(f"{gcs_glob}: {exc}")
 
     sorted_objects = sorted(objects.values(), key=lambda item: item[1], reverse=True)
-    accepted = []
-    accepted_by_service: dict[str, tuple[str, dt.datetime, str]] = {}
+    accepted: list[tuple[str, dt.datetime, str, str]] = []
+    accepted_by_service: dict[str, tuple[str, dt.datetime, str, str]] = {}
     inspected = []
     for uri, updated in sorted_objects[:max_reports]:
         payload = _cat_gcs_json(uri, project=project)
@@ -1172,24 +1182,30 @@ def main(now: dt.datetime | None = None) -> int:
         ok, reason = _is_accepted_report(payload)
         inspected.append(f"- {updated.isoformat()} {uri} {reason}")
         if ok:
+            execution_backend = _report_execution_backend(payload)
             if required_keys:
-                accepted_by_service[service_name] = (uri, updated, reason)
+                accepted_by_service.setdefault(
+                    service_name,
+                    (uri, updated, reason, execution_backend),
+                )
             else:
-                accepted.append((uri, updated, reason))
+                accepted.append((uri, updated, reason, execution_backend))
 
     if required_keys:
         missing = [key for key in required_keys if key not in accepted_by_service]
         if not missing:
             details = ", ".join(
-                f"{required_labels[key]}@{accepted_by_service[key][1].isoformat()}"
+                f"{required_labels[key]}@{accepted_by_service[key][1].isoformat()} "
+                f"backend={accepted_by_service[key][3]}"
                 for key in required_keys
             )
             print(f"Execution report heartbeat OK for {name}: {details}")
             return 0
     if accepted:
-        uri, updated, reason = accepted[0]
+        uri, updated, reason, execution_backend = accepted[0]
         print(
-            f"Execution report heartbeat OK for {name}: {reason}, updated={updated.isoformat()}, uri={uri}"
+            f"Execution report heartbeat OK for {name}: {reason}, updated={updated.isoformat()}, "
+            f"backend={execution_backend}, uri={uri}"
         )
         return 0
 
